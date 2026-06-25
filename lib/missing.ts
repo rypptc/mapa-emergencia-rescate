@@ -1,4 +1,5 @@
 import { getSql, hasDbEnv } from "./db";
+import type { ExternalPerson } from "./sync/types";
 
 export type MissingStatus = "active" | "found";
 
@@ -703,4 +704,90 @@ export async function listMissingMapMarkers(
     lng: Number(row.lng),
     createdAt: Number(row.created_at),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Sincronización de fuentes externas (ver docs/rfcs/0001-sincronizacion-fuentes.md)
+// ---------------------------------------------------------------------------
+
+function clipText(value: unknown, max: number): string {
+  if (value === null || value === undefined) return "";
+  const s = String(value).trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+export interface UpsertResult {
+  /** true si fue INSERT (registro nuevo); false si fue UPDATE. */
+  inserted: boolean;
+}
+
+/**
+ * Camino ÚNICO de escritura para registros provenientes de fuentes externas.
+ * Idempotente por `external_id` namespaced (`${source}:${externalId}`): re-correr
+ * la sincronización no duplica, solo actualiza los campos que cambian.
+ *
+ * Lo usan tanto el motor de sync automático como (a futuro) el script legacy,
+ * para que haya una sola fuente de verdad de cómo se insertan estos registros.
+ */
+export async function upsertExternalMissing(
+  input: ExternalPerson,
+): Promise<UpsertResult> {
+  if (!hasDbEnv()) {
+    throw new Error(
+      "upsertExternalMissing requiere DATABASE_URL (la sincronización necesita DB).",
+    );
+  }
+  await ensureSchema();
+
+  const externalId = `${input.source}:${input.externalId}`;
+  const name = clipText(input.name, MAX_NAME);
+  if (!name) throw new Error("Registro sin nombre.");
+  const age = normalizeAge(input.age);
+  const description = clipText(input.description, MAX_DESCRIPTION);
+  const lastSeen = clipText(input.lastSeen, MAX_LAST_SEEN);
+  // El contacto solo llega si el adaptador decidió importarlo (ver RFC §6).
+  const contact = clipText(input.contact, MAX_CONTACT);
+  const photoExternal =
+    typeof input.photoUrl === "string" && /^https?:\/\//i.test(input.photoUrl)
+      ? input.photoUrl.slice(0, 600)
+      : null;
+  const source = clipText(input.source, 120) || null;
+  const sourceUrl =
+    typeof input.sourceUrl === "string" ? input.sourceUrl.slice(0, 300) : null;
+
+  const status: MissingStatus = input.status === "found" ? "found" : "active";
+  const resolutionNote =
+    status === "found" && input.resolutionNote
+      ? clipText(input.resolutionNote, MAX_RESOLUTION_NOTE) || null
+      : null;
+  const resolvedAt =
+    status === "found" ? (input.resolvedAt ?? Date.now()) : null;
+  const createdAt = input.createdAt ?? Date.now();
+
+  const rows = (await getSql()`
+    INSERT INTO missing_persons (
+      id, name, age, description, last_seen, contact,
+      photo_external_url, external_id, source, source_url,
+      status, resolution_note, resolved_at, created_at
+    ) VALUES (
+      ${crypto.randomUUID()}, ${name}, ${age}, ${description}, ${lastSeen}, ${contact},
+      ${photoExternal}, ${externalId}, ${source}, ${sourceUrl},
+      ${status}, ${resolutionNote}, ${resolvedAt}, ${createdAt}
+    )
+    ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO UPDATE SET
+      name = EXCLUDED.name,
+      age = EXCLUDED.age,
+      description = EXCLUDED.description,
+      last_seen = EXCLUDED.last_seen,
+      contact = EXCLUDED.contact,
+      photo_external_url = COALESCE(missing_persons.photo_external_url, EXCLUDED.photo_external_url),
+      source = COALESCE(missing_persons.source, EXCLUDED.source),
+      source_url = COALESCE(missing_persons.source_url, EXCLUDED.source_url),
+      status = EXCLUDED.status,
+      resolution_note = COALESCE(EXCLUDED.resolution_note, missing_persons.resolution_note),
+      resolved_at = COALESCE(EXCLUDED.resolved_at, missing_persons.resolved_at)
+    RETURNING (xmax = 0) AS inserted
+  `) as { inserted: boolean }[];
+
+  return { inserted: Boolean(rows[0]?.inserted) };
 }
