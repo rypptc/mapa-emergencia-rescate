@@ -134,6 +134,11 @@ export default function Home() {
           Plataforma de reporte ciudadano. Datos de mapas © OpenStreetMap. En caso
           de peligro inmediato, contacta también a los servicios de emergencia
           oficiales.
+          <div className="mt-2">
+            <a href="/admin" className="text-slate-400 hover:text-slate-600 hover:underline">
+              Panel de administración
+            </a>
+          </div>
         </div>
       </footer>
     </main>
