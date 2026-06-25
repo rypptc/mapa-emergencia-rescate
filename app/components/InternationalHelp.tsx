@@ -118,6 +118,43 @@ const OFFICES: CountryOffice[] = [
     ],
   },
   {
+    country: "Aruba",
+    countryCode: "AW",
+    organization: "Aruba se une por Venezuela",
+    lines: [
+      {
+        type: "web",
+        label: "Centro principal en Paseo Herencia Mall",
+        href: "https://www.facebook.com/calientearuba/posts/aruba-aruba-se-moviliza-para-brindar-ayuda-humanitaria-a-los-afectados-por-el-te/1326099352835331/",
+      },
+    ],
+    donationPoints: [
+      {
+        city: "Palm Beach",
+        name: "Paseo Herencia Mall",
+        address: "J.E. Irausquin Blvd. 382-A, Palm Beach, Aruba",
+        accepts:
+          "Insumos destinados a familias afectadas por el terremoto; verificar lista vigente antes de trasladarse.",
+        source: "Caliente 90.7 FM Aruba",
+        sourceHref:
+          "https://www.facebook.com/calientearuba/posts/aruba-aruba-se-moviliza-para-brindar-ayuda-humanitaria-a-los-afectados-por-el-te/1326099352835331/",
+        updatedAt: "25 jun 2026",
+      },
+    ],
+    shareChannels: [
+      {
+        name: "Aruba se une por Venezuela",
+        description:
+          "Campaña comunitaria con centro principal de acopio en Paseo Herencia Mall, Palm Beach.",
+        href: "https://www.instagram.com/p/DaBIkBgGlT0/",
+        source: "Instagram / Caliente 90.7 FM Aruba",
+        sourceHref: "https://www.instagram.com/p/DaBIkBgGlT0/",
+        updatedAt: "25 jun 2026",
+        status: "social",
+      },
+    ],
+  },
+  {
     country: "Canadá",
     countryCode: "CA",
     organization: "San Lorenzo Community Center",
@@ -967,6 +1004,7 @@ const CONTACT_ICON = {
 
 const TIME_ZONE_COUNTRY_CODES: Record<string, string> = {
   "America/Argentina/Buenos_Aires": "AR",
+  "America/Aruba": "AW",
   "America/Bogota": "CO",
   "America/Toronto": "CA",
   "America/Vancouver": "CA",
