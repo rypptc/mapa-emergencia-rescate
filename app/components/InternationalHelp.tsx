@@ -669,6 +669,45 @@ const OFFICES: CountryOffice[] = [
     ],
   },
   {
+    country: "República Dominicana",
+    countryCode: "DO",
+    organization: "Centro de Acopio Unidos por Venezuela",
+    lines: [
+      {
+        type: "web",
+        label: "Centro en Hard Rock Café Punta Cana",
+        href: "https://bavaronews.com/locales/venezolanos-en-punta-cana-habilitan-centro-de-acopio-para-asistir-afectados-por-terremotos/",
+      },
+    ],
+    donationPoints: [
+      {
+        city: "Punta Cana",
+        name: "Hard Rock Café Punta Cana",
+        address:
+          "Plaza Downtown, Blvd. Turístico del Este esquina Ave. Barceló, Punta Cana",
+        accepts:
+          "Alimentos no perecederos, agua, medicamentos, ropa y artículos de primera necesidad.",
+        source: "Bávaro News",
+        sourceHref:
+          "https://bavaronews.com/locales/venezolanos-en-punta-cana-habilitan-centro-de-acopio-para-asistir-afectados-por-terremotos/",
+        updatedAt: "25 jun 2026",
+      },
+    ],
+    shareChannels: [
+      {
+        name: "Centro de Acopio Unidos por Venezuela",
+        description:
+          "Iniciativa de venezolanos en Punta Cana para recibir ayuda humanitaria en Hard Rock Café Punta Cana.",
+        href: "https://bavaronews.com/locales/venezolanos-en-punta-cana-habilitan-centro-de-acopio-para-asistir-afectados-por-terremotos/",
+        source: "Bávaro News",
+        sourceHref:
+          "https://bavaronews.com/locales/venezolanos-en-punta-cana-habilitan-centro-de-acopio-para-asistir-afectados-por-terremotos/",
+        updatedAt: "25 jun 2026",
+        status: "verified",
+      },
+    ],
+  },
+  {
     country: "Reino Unido",
     countryCode: "GB",
     organization: "British Red Cross / organizaciones humanitarias",
@@ -830,6 +869,17 @@ const OFFICES: CountryOffice[] = [
         sourceHref: "https://www.instagram.com/reel/DaBIm84zmmG/",
         updatedAt: "25 jun 2026",
       },
+      {
+        city: "Murray, UT",
+        name: "Utah se une por Venezuela",
+        address: "162 E 4500 S, Murray, UT 84107",
+        accepts:
+          "Insumos médicos, higiene personal, ropa ligera, alimentos no perecederos y artículos esenciales.",
+        source: "Panas en Utah",
+        sourceHref:
+          "https://www.panasenutah.com/2026/06/25/comunidad-venezolana-en-utah-organiza-ayuda-urgente-para-afectados/",
+        updatedAt: "25 jun 2026",
+      },
     ],
     shareChannels: [
       {
@@ -875,6 +925,7 @@ const TIME_ZONE_COUNTRY_CODES: Record<string, string> = {
   "America/Halifax": "CA",
   "America/Costa_Rica": "CR",
   "America/Guayaquil": "EC",
+  "America/Santo_Domingo": "DO",
   "Europe/Madrid": "ES",
   "Atlantic/Canary": "ES",
   "America/Tegucigalpa": "HN",
