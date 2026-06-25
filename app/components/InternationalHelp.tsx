@@ -804,6 +804,31 @@ const OFFICES: CountryOffice[] = [
     ],
   },
   {
+    country: "Países Bajos",
+    countryCode: "NL",
+    organization: "Rode Kruis Nederland",
+    lines: [
+      {
+        type: "web",
+        label: "Rode Kruis - gironummer 5125",
+        href: "https://www.rodekruis.nl/persberichten/rode-kruis-opent-gironummer-5125-voor-slachtoffers-aardbeving-venezuela/",
+      },
+    ],
+    shareChannels: [
+      {
+        name: "Rode Kruis Nederland",
+        description:
+          "Cruz Roja Neerlandesa abrió el giro 5125 para ayudar a víctimas del terremoto en Venezuela.",
+        href: "https://www.rodekruis.nl/persberichten/rode-kruis-opent-gironummer-5125-voor-slachtoffers-aardbeving-venezuela/",
+        source: "Rode Kruis Nederland",
+        sourceHref:
+          "https://www.rodekruis.nl/persberichten/rode-kruis-opent-gironummer-5125-voor-slachtoffers-aardbeving-venezuela/",
+        updatedAt: "25 jun 2026",
+        status: "verified",
+      },
+    ],
+  },
+  {
     country: "Panamá",
     countryCode: "PA",
     organization: "Alcaldía de Panamá / centros aliados",
@@ -1251,6 +1276,7 @@ const TIME_ZONE_COUNTRY_CODES: Record<string, string> = {
   "Europe/Dublin": "IE",
   "Europe/Rome": "IT",
   "America/Mexico_City": "MX",
+  "Europe/Amsterdam": "NL",
   "Pacific/Auckland": "NZ",
   "America/Panama": "PA",
   "America/Puerto_Rico": "PR",
