@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Volcado vendado de un design system (no es código de la app).
+    "Emergencia nacional de búsqueda/**",
+    // Scripts de build/utilidades (Node .mjs, usan require/CommonJS); no se
+    // lintean con las reglas TS de la app.
+    "scripts/**",
   ]),
   {
     rules: {
