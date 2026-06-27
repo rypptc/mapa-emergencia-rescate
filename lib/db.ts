@@ -6,24 +6,6 @@ export function hasDbEnv(): boolean {
 }
 
 /**
- * ¿La URL apunta a Neon (driver HTTP) o a un Postgres plano por TCP?
- *
- * El driver `neon()` habla SQL-sobre-HTTP contra el endpoint de Neon, así que
- * NO puede conectarse a un Postgres normal (localhost en desarrollo, o el VPS
- * de Postgres en Hetzner en producción). Sólo usamos `neon()` cuando el host es
- * de Neon; para cualquier otro Postgres usamos `node-postgres` (TCP). Detectar
- * por host (no por "localhost") es lo que permite correr contra el Postgres
- * privado de Hetzner además de en local.
- */
-function isNeonUrl(url: string): boolean {
-  try {
-    return new URL(url).hostname.endsWith(".neon.tech");
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Adaptador `node-postgres` (TCP) que expone la misma interfaz de template tag
  * que el resto del código (`sql\`...\``) y devuelve el array de filas, igual que
  * Neon con `fullResults: false`. Se usa para todo Postgres plano: desarrollo
@@ -51,12 +33,35 @@ function createTcpSql(url: string): NeonQueryFunction<false, false> {
   return sql as unknown as NeonQueryFunction<false, false>;
 }
 
+/**
+ * Elige el driver. Explícito gana SIEMPRE sobre el valor por defecto:
+ *
+ *   1. DB_DRIVER=tcp   -> fuerza node-postgres (Hetzner, local).
+ *   2. DB_DRIVER=neon  -> fuerza el driver HTTP de Neon.
+ *   3. (sin DB_DRIVER) -> POR DEFECTO neon (es el prod actual de Vercel+Neon;
+ *      es el fallback seguro: si alguien despliega sin fijar la variable, no se
+ *      rompe Neon). Los entornos TCP (Hetzner, compose) fijan DB_DRIVER=tcp
+ *      explícitamente, así que no dependen de este default.
+ *
+ * Nota: ya NO se autodetecta por host. La elección es explícita o el default
+ * neon — para que un cambio en la URL nunca cambie el driver por sorpresa.
+ */
+function chooseDriver(): "neon" | "tcp" {
+  const forced = process.env.DB_DRIVER?.toLowerCase();
+  if (forced === "tcp") return "tcp";
+  if (forced === "neon") return "neon";
+  if (forced) {
+    throw new Error(`DB_DRIVER inválido: "${forced}". Usa "neon" o "tcp".`);
+  }
+  return "neon"; // default seguro
+}
+
 let _sql: NeonQueryFunction<false, false> | null = null;
 
 export function getSql(): NeonQueryFunction<false, false> {
   if (!_sql) {
     const url = process.env.DATABASE_URL!;
-    _sql = isNeonUrl(url) ? neon(url) : createTcpSql(url);
+    _sql = chooseDriver() === "neon" ? neon(url) : createTcpSql(url);
   }
   return _sql;
 }

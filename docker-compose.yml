@@ -32,9 +32,10 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      # In-container, reach Postgres by service name. Non-Neon host -> lib/db.ts
-      # uses the pg TCP driver.
+      # In-container, reach Postgres by service name.
       DATABASE_URL: postgres://mapa_app:localdev@db:5432/app
+      # Pin the driver explicitly (don't rely on host autodetection).
+      DB_DRIVER: tcp
       TRUSTED_IP_HEADER: x-forwarded-for
     ports:
       - "3000:3000"

@@ -6,8 +6,11 @@
 # configure TLS termination (managed Let's Encrypt) and the health check at
 # the LB, mirroring the Hermes target-group health check.
 #
-# NOTE: set the cert/hostname annotations to your real domain before relying on
-# managed TLS. Until then the LB serves HTTP on :80.
+# Domain: vzla-terremoto.dreamit.software
+# The LB terminates TLS with a managed Let's Encrypt cert for that hostname and
+# redirects http->https. After the first deploy, point a DNS A/AAAA record for
+# vzla-terremoto.dreamit.software at the LB's public IP (printed by the deploy);
+# the managed cert only issues once DNS resolves to the LB.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -30,17 +33,24 @@ metadata:
     load-balancer.hetzner.cloud/health-check-http-path: "/api/readyz"
     load-balancer.hetzner.cloud/health-check-interval: "15s"
     load-balancer.hetzner.cloud/health-check-retries: "2"
-    # --- Managed TLS (uncomment + set once DNS/domain is ready) ---
-    # load-balancer.hetzner.cloud/hostname: "app.example.com"
-    # load-balancer.hetzner.cloud/http-redirect-http: "true"
-    # load-balancer.hetzner.cloud/protocol: "https"
-    # load-balancer.hetzner.cloud/uses-proxyprotocol: "false"
-    # load-balancer.hetzner.cloud/certificate-type: "managed"
+    # --- Managed TLS (Let's Encrypt) for the domain ---
+    load-balancer.hetzner.cloud/hostname: "vzla-terremoto.dreamit.software"
+    load-balancer.hetzner.cloud/protocol: "https"
+    load-balancer.hetzner.cloud/certificate-type: "managed"
+    # The :443 listener carries the cert; redirect plain http:80 -> https.
+    load-balancer.hetzner.cloud/http-redirect-https: "true"
+    load-balancer.hetzner.cloud/uses-proxyprotocol: "false"
 spec:
   type: LoadBalancer
   selector:
     app: mapa
   ports:
+    # https (TLS terminated at the LB) -> app on 3000
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 3000
+    # http kept so the LB can 301-redirect it to https
     - name: http
       protocol: TCP
       port: 80
