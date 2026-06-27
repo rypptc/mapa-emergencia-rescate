@@ -2158,7 +2158,7 @@ export default function InternationalHelp() {
 
   return (
     <section id="ayuda-internacional" className="bg-slate-50">
-      <div className="mx-auto w-full max-w-7xl px-4 py-8 sm:py-12">
+      <div className="mx-auto w-full max-w-[1120px] px-4 py-8 sm:py-12">
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <div className="grid gap-5 lg:grid-cols-[1fr_22rem] lg:items-start">
             <div className="flex items-start gap-4">
