@@ -13,11 +13,16 @@ RUN npm ci --no-audit --no-fund
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Commit SHA -> baked into the bundle. Reserved for version-skew protection
-# (deterministic build id) once we wire it into next.config.ts, same as Hermes.
-# Unset in local builds -> Next falls back to its default build id.
+# Commit SHA -> deterministic build id + deploymentId (version-skew protection,
+# see next.config.ts). Unset in local builds -> Next falls back to "dev".
 ARG APP_BUILD_SHA
 ENV APP_BUILD_SHA=$APP_BUILD_SHA
+# CDN origin for /_next/static (R2 + Cloudflare custom domain). Baked into the
+# bundle at build time so chunks load from the CDN, not the pod — fixes the
+# deploy-window version-skew 404 / "Loading…" hang. Unset -> no prefix (assets
+# served by the app, same as today). See next.config.ts + static-assets plan.
+ARG NEXT_PUBLIC_ASSET_PREFIX
+ENV NEXT_PUBLIC_ASSET_PREFIX=$NEXT_PUBLIC_ASSET_PREFIX
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
@@ -34,8 +39,9 @@ ENV HOSTNAME=0.0.0.0
 # The standalone server.js + traced node_modules:
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 # public/ and .next/static are NOT in standalone by default — copy them so
-# server.js serves them (Next docs). Long term, /_next/static moves to a CDN
-# (R2) per the static-assets plan; until then the app serves them.
+# server.js serves them (Next docs). /_next/static ALSO syncs to the R2 CDN at
+# deploy time (assetPrefix points chunks there); these in-image copies stay as
+# the origin/fallback and so `public/` is served regardless.
 COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 

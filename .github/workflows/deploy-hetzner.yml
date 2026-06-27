@@ -89,6 +89,7 @@ jobs:
             ${{ env.IMAGE }}:latest
           build-args: |
             APP_BUILD_SHA=${{ github.sha }}
+            NEXT_PUBLIC_ASSET_PREFIX=${{ secrets.NEXT_PUBLIC_ASSET_PREFIX }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -280,6 +281,45 @@ jobs:
             --from-literal=DB_DRIVER=tcp \
             --from-literal=TRUSTED_IP_HEADER=x-forwarded-for \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      # Upload the freshly-built /_next/static to the R2 CDN bucket BEFORE rolling
+      # the app (push-then-roll), and NEVER --delete (old builds must stay so
+      # in-flight sessions on the previous build keep resolving). No-op when the
+      # R2 secrets aren't set, so it's safe before the CDN is wired. Extracts the
+      # assets from the image we just pushed — byte-for-byte what will run.
+      # The three hard rules (footguns that re-create the version-skew bug):
+      #   1. push-then-roll (this step runs before Apply/Roll below)
+      #   2. additive sync, NEVER --delete (old chunks must survive)
+      #   3. no CDN invalidation — assets are content-hashed + immutable
+      - name: Upload static assets to R2 CDN
+        if: ${{ inputs.what == 'deploy' || inputs.what == 'provision' || inputs.what == 'recreate-master' }}
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_STATIC_BUCKET: ${{ secrets.R2_STATIC_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # Gate inside the script — `secrets` isn't valid in a step `if:`.
+          if [ -z "${R2_ENDPOINT:-}" ] || [ -z "${R2_STATIC_BUCKET:-}" ]; then
+            echo "R2 secrets unset — CDN not wired yet, skipping static upload."
+            exit 0
+          fi
+          # Copy /_next/static out of the image we just pushed.
+          IMAGE="${{ env.IMAGE }}:${{ github.sha }}"
+          docker pull "$IMAGE"
+          CID=$(docker create "$IMAGE")
+          rm -rf /tmp/next-static && mkdir -p /tmp/next-static
+          docker cp "$CID":/app/.next/static/. /tmp/next-static/
+          docker rm "$CID"
+          # Sync under the SAME /_next/static/ key the browser requests, with the
+          # immutable cache header. Additive — NO --delete. R2 is S3-compatible.
+          aws s3 sync /tmp/next-static "s3://$R2_STATIC_BUCKET/_next/static" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --checksum-algorithm CRC32 \
+            --no-progress
+          echo "Synced $(find /tmp/next-static -type f | wc -l) files to r2://$R2_STATIC_BUCKET/_next/static"
 
       - name: Apply manifests
         if: ${{ inputs.what == 'deploy' || inputs.what == 'provision' || inputs.what == 'recreate-master' }}

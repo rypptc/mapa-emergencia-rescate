@@ -35,9 +35,11 @@ metadata:
     # Route to pods over the private network (no public pod IPs).
     load-balancer.hetzner.cloud/use-private-ip: "true"
     load-balancer.hetzner.cloud/name: "mapa-lb"
-    # Active health check — the LB only sends traffic to Ready pods.
+    # Active health check. Do NOT set health-check-port: the CCM health-checks
+    # the Service's NodePort on each node (3000 is the pod-internal port, NOT
+    # open on the host — setting it makes every check fail -> LB 503s). Omitting
+    # the port lets the CCM use the right NodePort automatically.
     load-balancer.hetzner.cloud/health-check-protocol: "http"
-    load-balancer.hetzner.cloud/health-check-port: "3000"
     load-balancer.hetzner.cloud/health-check-http-path: "/api/readyz"
     load-balancer.hetzner.cloud/health-check-interval: "15s"
     load-balancer.hetzner.cloud/health-check-retries: "2"
