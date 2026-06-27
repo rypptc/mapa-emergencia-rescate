@@ -19,4 +19,17 @@ resource "hcloud_firewall" "db" {
     port       = "22"
     source_ips = ["0.0.0.0/0", "::/0"]
   }
+
+  # k3s API server. The GitHub Actions runner needs to reach the master's
+  # kube-apiserver on 6443 to deploy. Runner IPs are dynamic so we can't pin
+  # source_ips; access is still gated by the client cert baked into the
+  # kubeconfig (no cert = no access). Tighten or move to an SSH tunnel for prod.
+  # Only the master actually listens on 6443 (DB/Valkey servers don't), so this
+  # rule is a no-op on those even though they share the firewall.
+  rule {
+    direction  = "in"
+    protocol   = "tcp"
+    port       = "6443"
+    source_ips = ["0.0.0.0/0", "::/0"]
+  }
 }
