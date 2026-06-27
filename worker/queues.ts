@@ -55,7 +55,7 @@ export async function enqueueTable(name: string, opts?: JobsOptions) {
     name,
     { table: name },
     {
-      jobId: `tbl:${name}`,
+      jobId: `tbl-${name}`,
       attempts: 3,
       backoff: { type: "exponential", delay: 5_000 },
       removeOnComplete: REMOVE_ON_COMPLETE,
@@ -70,7 +70,7 @@ export async function enqueuePhoto(table: PhotoTable, id: string, opts?: JobsOpt
     table,
     { table, id },
     {
-      jobId: `img:${table}:${id}`, // dedupe: re-enqueue is a no-op
+      jobId: `img-${table}-${id}`, // dedupe: re-enqueue is a no-op (no ':' — BullMQ forbids it)
       attempts: 4,
       backoff: { type: "exponential", delay: 3_000 },
       removeOnComplete: REMOVE_ON_COMPLETE,

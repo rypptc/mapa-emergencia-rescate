@@ -58,3 +58,20 @@ deterministic jobIds + the `photo_migrated_at` stamp make it safe & resumable.
 npm run worker          # run workers against your .env
 npm run migrate:enqueue # run the producer
 ```
+
+## Gotchas (learned the hard way — don't reintroduce)
+
+- **BullMQ custom jobIds (regular `queue.add`) cannot contain `:`** — it throws
+  `Custom Id cannot contain :`. Use `-` separators (`tbl-<name>`,
+  `img-<table>-<uuid>`), matching boahaus's `generateJobId` (`mod-type-iso-rand`).
+  (boahaus's `notif:uid:rule` colons are OK only because those are *repeatable*
+  jobs — the `:` ban applies solely to regular-job custom ids.)
+- **Pin `ioredis` to bullmq's exact version** (`5.10.1`). bullmq pins ioredis
+  exactly (not a range); a different root version installs two copies and TS
+  errors on the `Worker` connection type.
+- **Dockerfile stage order**: `runtime` (the app) must be the LAST stage, and the
+  app build must pass `target: runtime`. If `worker` is last and a build omits
+  `--target`, docker builds the worker image and pushes it under the app tag —
+  the app then has no `.next/static` (R2 upload + the app both break).
+- `worker/` is excluded from the app `tsconfig.json`; it has its own
+  `worker/tsconfig.json` (es2022 / nodenext) and runs via `tsx`.
