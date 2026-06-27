@@ -84,9 +84,13 @@ acción.
 - [0005 — Endurecimiento de la superficie HTTP ante el pico mediático](adr/0005-endurecimiento-superficie-http.md) · _aceptada_
 - [0006 — Estrategia de búsqueda (trigram + mínimo, conteo acotado y caché)](adr/0006-estrategia-de-busqueda.md) · _aceptada_
 
+### Base de datos
+
+- [Modelo de datos (esquema + relaciones + diagrama)](db/modelo-de-datos.md)
+
 ### Arquitectura
 
-_(pendiente)_
+- [Despliegue (Hetzner + k3s + OpenTofu)](architecture/despliegue-kubernetes.md)
 
 ### Guías
 

@@ -14,7 +14,9 @@
  *     oid 20 as a JS number for driver parity).
  *   - Coordinates: DOUBLE PRECISION (`doublePrecision`).
  *
- * 12 tables total. The only real relation is hospital_patients -> hospitals.
+ * 16 tables total. The only real relation is hospital_patients -> hospitals.
+ * (12 canónicas + contact_messages, analytics_events, damage_candidates,
+ * unidentified_persons; estas 4 existen en prod aunque parte sean legado.)
  */
 import { sql } from "drizzle-orm";
 import {
@@ -25,6 +27,7 @@ import {
   doublePrecision,
   boolean,
   bigserial,
+  jsonb,
   primaryKey,
   index,
   uniqueIndex,
@@ -115,13 +118,16 @@ export const chatMessages = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull().default("Anónimo"),
-    role: text("role").notNull().default("citizen"),
+    role: text("role").notNull().default("ciudadano"),
     text: text("text").notNull(),
     replyTo: text("reply_to"),
     replyPreview: text("reply_preview"),
     threadRootId: text("thread_root_id"),
-    threadBumpedAt: epochMs("thread_bumped_at").notNull(),
+    // Nullable en prod: filas antiguas se rellenan con UPDATE en lib/chat.ts.
+    threadBumpedAt: epochMs("thread_bumped_at"),
     createdAt: epochMs("created_at").notNull(),
+    // Nota: prod conserva 3 columnas legado (reply_to_id/name/text) ya en
+    // desuso (sustituidas por reply_to/reply_preview). Se omiten a propósito.
   },
   (t) => [
     index("idx_chat_thread_bumped").on(t.threadBumpedAt.desc()),
@@ -189,6 +195,9 @@ export const donations = pgTable(
     ipHash: text("ip_hash"),
     userAgent: text("user_agent"),
     createdAt: epochMs("created_at").notNull(),
+    // Ciclo de vida de la donación. Hoy la app nunca lo muta (insert-only), por
+    // eso worker/tables.ts la trata como append-only ("ignore").
+    status: text("status").notNull().default("intent"),
   },
   (t) => [index("donations_created_at_idx").on(t.createdAt.desc())],
 );
@@ -251,3 +260,76 @@ export const syncRuns = pgTable(
   },
   (t) => [index("idx_sync_runs_started").on(t.startedAt.desc())],
 );
+
+/* ----------------------------------------------------- contact_messages */
+// Bandeja de contacto del panel admin. La DDL viva está en
+// lib/contact-inbox.ts (CREATE TABLE IF NOT EXISTS); se refleja aquí para
+// centralizar el esquema.
+export const contactMessages = pgTable(
+  "contact_messages",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    email: text("email").notNull(),
+    subject: text("subject").notNull(),
+    message: text("message").notNull(),
+    read: boolean("read").notNull().default(false),
+    ipHash: text("ip_hash"),
+    createdAt: epochMs("created_at").notNull(),
+  },
+  (t) => [
+    index("contact_messages_created_at_idx").on(t.createdAt.desc()),
+    index("contact_messages_unread_idx").on(t.read, t.createdAt.desc()),
+  ],
+);
+
+/* ----------------------------------------------------- analytics_events */
+// Eventos de analítica. Presente en prod; sin acceso desde el código de la
+// app (legado/externo). Se documenta para que el esquema cubra prod.
+export const analyticsEvents = pgTable("analytics_events", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  type: text("type").notNull(),
+  path: text("path").notNull(),
+  label: text("label").notNull().default(""),
+  referrer: text("referrer").notNull().default(""),
+  userAgent: text("user_agent").notNull().default(""),
+  screen: text("screen").notNull().default(""),
+  language: text("language").notNull().default(""),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdAt: epochMs("created_at").notNull(),
+});
+
+/* ---------------------------------------------------- damage_candidates */
+// Candidatos de daño estructural. Presente en prod; legado/externo.
+export const damageCandidates = pgTable("damage_candidates", {
+  id: text("id").primaryKey(),
+  buildingId: text("building_id").notNull(),
+  name: text("name").notNull().default(""),
+  lat: doublePrecision("lat").notNull(),
+  lng: doublePrecision("lng").notNull(),
+  damageLevel: text("damage_level").notNull(),
+  confidence: doublePrecision("confidence").notNull().default(0),
+  reviewStatus: text("review_status").notNull().default("needs_review"),
+  sourceBefore: text("source_before").notNull().default(""),
+  sourceAfter: text("source_after").notNull().default(""),
+  sourceUrl: text("source_url").notNull().default(""),
+  notes: text("notes").notNull().default(""),
+  createdAt: epochMs("created_at").notNull(),
+  updatedAt: epochMs("updated_at").notNull(),
+});
+
+/* ------------------------------------------------- unidentified_persons */
+// Personas no identificadas. Presente en prod; legado/externo.
+export const unidentifiedPersons = pgTable("unidentified_persons", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("alive"),
+  name: text("name").notNull().default(""),
+  surname: text("surname").notNull().default(""),
+  locationFound: text("location_found").notNull().default(""),
+  description: text("description").notNull().default(""),
+  contactName: text("contact_name").notNull().default(""),
+  contactPhone: text("contact_phone").notNull().default(""),
+  photo: text("photo"),
+  createdAt: epochMs("created_at").notNull(),
+});
