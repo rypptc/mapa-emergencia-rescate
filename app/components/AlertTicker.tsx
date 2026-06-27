@@ -77,13 +77,13 @@ export default function AlertTicker() {
         />
         Alerta
       </div>
-      <div className="relative flex-1 overflow-hidden">
-        <div className="alert-ticker__track flex whitespace-nowrap">
+      <div className="relative flex flex-1 items-center self-stretch overflow-hidden">
+        <div className="alert-ticker__track flex items-center whitespace-nowrap">
           {items.map((item, i) =>
             item.kind === "text" ? (
               <span
                 key={i}
-                className="px-8 text-xs text-red-900"
+                className="px-8 text-xs leading-none text-red-900"
                 style={{ fontWeight: 400 }}
               >
                 {item.message}

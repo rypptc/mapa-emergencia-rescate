@@ -1822,6 +1822,12 @@ a:focus-visible,
 	animation: ticker 28s linear infinite;
 }
 
+@media (max-width: 640px) {
+	.alert-ticker__track {
+		animation-duration: 16s;
+	}
+}
+
 .alert-ticker:hover .alert-ticker__track,
 .alert-ticker:focus-within .alert-ticker__track,
 .alert-ticker.is-paused .alert-ticker__track {
