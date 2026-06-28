@@ -1,45 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMissingStats } from "./useMissingStats";
 
 /**
  * Tarjeta de stats en vivo del hero (mockup "ALERTA ACTIVA"): personas buscadas
- * y localizadas. Solo presentación — reusa los mismos endpoints que la navbar
- * (/api/missing). No expone datos nuevos: "brigadas" se omite a propósito
- * porque no hay fuente de datos para ese número. ponytail.
+ * y localizadas. Conteos del store compartido useMissingStats (un solo poll para
+ * toda la página, ver ese módulo). No expone datos nuevos. ponytail.
  */
 export default function HeroStats() {
-  const [missing, setMissing] = useState<number | null>(null);
-  const [found, setFound] = useState<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [activeRes, foundRes] = await Promise.all([
-          fetch("/api/missing?pageSize=1", { cache: "no-store" }),
-          fetch("/api/missing?status=found&pageSize=1", { cache: "no-store" }),
-        ]);
-        if (cancelled) return;
-        if (activeRes.ok) {
-          const data = await activeRes.json();
-          if (!cancelled) setMissing(data.total ?? 0);
-        }
-        if (foundRes.ok) {
-          const data = await foundRes.json();
-          if (!cancelled) setFound(data.total ?? 0);
-        }
-      } catch {
-        // se reintenta en el próximo ciclo
-      }
-    };
-    load();
-    const id = setInterval(load, 60_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
+  const stats = useMissingStats();
+  const missing = stats?.active ?? null;
+  const found = stats?.found ?? null;
 
   const fmt = (n: number | null) =>
     n === null ? "—" : n.toLocaleString("es-VE");

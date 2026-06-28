@@ -18,7 +18,8 @@ import {
 	EDIFICIOS_SOURCE_LABEL,
 	EDIFICIOS_SOURCE_URL,
 } from "@/lib/edificios";
-import type { MissingMapMarker, MissingStats } from "@/lib/missing";
+import type { MissingMapMarker } from "@/lib/missing";
+import { useMissingStats } from "./useMissingStats";
 import type { MapBounds } from "./MapView";
 import {
 	countPending,
@@ -165,7 +166,9 @@ export default function EmergencyApp() {
 		if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 		return { lat, lng, ts: Date.now() };
 	});
-	const [missingStats, setMissingStats] = useState<MissingStats | null>(null);
+	// Store compartido: un solo poll de /api/missing/stats para toda la página
+	// (la navbar también lo usa). Antes EmergencyApp tenía su propio fetch+interval.
+	const missingStats = useMissingStats();
 	const [missingMapMarkers, setMissingMapMarkers] = useState<
 		MissingMapMarker[]
 	>([]);
@@ -222,17 +225,6 @@ export default function EmergencyApp() {
 			setPersistent(Boolean(data.persistent));
 		} catch {
 			// se reintenta en el siguiente ciclo de polling
-		}
-	}, []);
-
-	const fetchMissingStats = useCallback(async () => {
-		try {
-			const res = await fetch("/api/missing/stats", { cache: "no-cache" });
-			if (!res.ok) return;
-			const data = await res.json();
-			setMissingStats(data.stats ?? null);
-		} catch {
-			// se reintenta en el siguiente ciclo
 		}
 	}, []);
 
@@ -297,11 +289,9 @@ export default function EmergencyApp() {
 		const start = () => {
 			if (interval) return;
 			fetchReports();
-			fetchMissingStats();
 			fetchMissingMap();
 			interval = setInterval(() => {
 				fetchReports();
-				fetchMissingStats();
 			}, network.pollIntervalMs);
 		};
 		const stop = () => {
@@ -323,7 +313,6 @@ export default function EmergencyApp() {
 		};
 	}, [
 		fetchReports,
-		fetchMissingStats,
 		fetchMissingMap,
 		network.pollIntervalMs,
 	]);

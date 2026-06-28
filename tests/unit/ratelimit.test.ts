@@ -59,12 +59,24 @@ describe("clientIp", () => {
     expect(clientIp(new Request("http://test/"))).toBe("anon");
   });
 
-  it("prefiere TRUSTED_IP_HEADER y toma el primer valor", () => {
+  it("prefiere TRUSTED_IP_HEADER sobre x-real-ip", () => {
     vi.stubEnv("TRUSTED_IP_HEADER", "cf-connecting-ip");
     const req = new Request("http://test/", {
-      headers: { "cf-connecting-ip": "9.9.9.9, 8.8.8.8", "x-real-ip": "1.1.1.1" },
+      headers: { "cf-connecting-ip": "9.9.9.9", "x-real-ip": "1.1.1.1" },
     });
     expect(clientIp(req)).toBe("9.9.9.9");
+    vi.unstubAllEnvs();
+  });
+
+  it("toma el hop MÁS A LA DERECHA de TRUSTED_IP_HEADER (no el cliente)", () => {
+    // El valor más a la izquierda lo controla el cliente (un proxy ANTEPONE su
+    // hop), así que es falsificable. Tomamos el último: el que añadió el proxy
+    // más cercano a la app. Ver el comentario en lib/ratelimit.ts.
+    vi.stubEnv("TRUSTED_IP_HEADER", "x-forwarded-for");
+    const req = new Request("http://test/", {
+      headers: { "x-forwarded-for": "9.9.9.9, 8.8.8.8", "x-real-ip": "1.1.1.1" },
+    });
+    expect(clientIp(req)).toBe("8.8.8.8");
     vi.unstubAllEnvs();
   });
 });

@@ -1,19 +1,20 @@
 import { NextResponse } from "next/server";
 import { isCronRequest } from "@/lib/admin";
-import { runGeocode } from "@/lib/sync/geocode";
+import { enqueueGeocode } from "@/worker/maintenance.queue";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
 /**
- * Geocodifica un lote acotado de ubicaciones sin coordenadas (cron de Vercel,
- * ver vercel.json). Respeta el límite de Nominatim (~1 req/s); varias corridas
- * cubren todas las ubicaciones. Idempotente (la caché evita re-geocodificar).
+ * Trigger del geocode. YA NO corre Nominatim inline (audit M-2): solo ENCOLA y
+ * vuelve 202. En Hetzner el camino primario es el scheduler del worker
+ * (registerMaintenanceSchedulers, cada 5 min); este endpoint queda como trigger
+ * externo/manual. Idempotente (jobId fijo). Sin frontend: nadie espera el
+ * resultado (alimenta geocode_cache → el mapa).
  *
  *   GET /api/sync/geocode            -> lote por defecto
  *   GET /api/sync/geocode?max=30     -> tope de ubicaciones únicas
  *
- * Auth: `Authorization: Bearer $CRON_SECRET` (lo pone Vercel) o token admin.
+ * Auth: `Authorization: Bearer $CRON_SECRET` o token admin.
  */
 /**
  * @swagger
@@ -28,21 +29,23 @@ export const maxDuration = 300;
  *         description: Tope de ubicaciones únicas a geocodificar en la corrida.
  *         schema: { type: integer, minimum: 1 }
  *     responses:
- *       200:
- *         description: Resumen de la corrida de geocodificación.
+ *       202:
+ *         description: Geocode encolado. Estado vía GET /api/sync/status?jobId=.
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
  *                 ok: { type: boolean }
+ *                 queued: { type: boolean }
+ *                 jobId: { type: string }
  *       401:
  *         description: No autorizado.
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
- *       500:
- *         description: Error al geocodificar.
+ *       503:
+ *         description: No se pudo encolar.
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
@@ -60,15 +63,15 @@ export async function GET(request: Request) {
     Number.isFinite(maxParam) && maxParam > 0 ? maxParam : undefined;
 
   try {
-    const result = await runGeocode({ maxLocations });
+    const jobId = await enqueueGeocode(maxLocations);
     return NextResponse.json(
-      { ok: true, ...result },
-      { headers: { "Cache-Control": "no-store" } },
+      { ok: true, queued: true, jobId },
+      { status: 202, headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Error al geocodificar." },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
+      { error: err instanceof Error ? err.message : "No se pudo encolar." },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 }

@@ -1,6 +1,7 @@
 import { desc, eq, sql } from "drizzle-orm";
 import { getDb, hasDbEnv, schema } from "./drizzle";
 import { isR2Configured, uploadPhotoDataUrl } from "./r2";
+import { isAllowedImageDataUrl, parseImageDataUri } from "./image";
 import {
   REPORT_TYPE_KEYS,
   type EmergencyReport,
@@ -19,9 +20,7 @@ interface MemoryRecord extends EmergencyReport {
 const memoryStore = new Map<string, MemoryRecord>();
 const memoryConfirmations = new Map<string, Set<string>>();
 
-function isValidPhotoDataUrl(photo: string): boolean {
-  return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo);
-}
+const isValidPhotoDataUrl = isAllowedImageDataUrl;
 
 function createReport(input: NewReport): {
   report: EmergencyReport;
@@ -165,9 +164,10 @@ export async function getReportPhoto(
   if (!dataUrl) return null;
   // Foto migrada a R2: `photo` es una URL del CDN → redirigir en vez de bytes.
   if (/^https?:\/\//i.test(dataUrl)) return { redirectTo: dataUrl };
-  const match = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(dataUrl);
-  if (!match) return null;
-  return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
+  // Parser central: rechaza subtipos no permitidos (svg/gif) (audit M-6).
+  const parsed = parseImageDataUri(dataUrl);
+  if (!parsed) return null;
+  return { contentType: parsed.contentType, buffer: parsed.bytes };
 }
 
 /** Devuelve el nuevo total de confirmaciones, o `null` si esa IP ya había

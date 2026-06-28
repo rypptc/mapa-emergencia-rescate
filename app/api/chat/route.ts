@@ -9,6 +9,8 @@ import {
 import { isPersistent } from "@/lib/store";
 import { checkRateLimit, clientIp } from "@/lib/ratelimit";
 import { readJson, bodyErrorResponse, BODY_LIMIT_TEXT } from "@/lib/body";
+import { cached } from "@/lib/cache";
+import { jsonWithEtag } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -87,10 +89,16 @@ export async function GET(request: Request) {
     ? (roleParam as ChatRole)
     : undefined;
 
-  const messages = await listMessages(roleFilter ? { role: roleFilter } : {});
-  return NextResponse.json(
+  // Chat es un endpoint polleado: cacheamos en proceso por ventana (igual que
+  // reports/missing) para no pegar a Postgres en cada poll, y usamos
+  // jsonWithEtag para corto-circuitar con 304 cuando no cambió nada (audit A-3).
+  const messages = await cached(`chat:${roleFilter ?? ""}`, 3_000, () =>
+    listMessages(roleFilter ? { role: roleFilter } : {}),
+  );
+  return jsonWithEtag(
+    request,
     { messages, persistent: isPersistent() },
-    { headers: LIST_CACHE_HEADERS },
+    LIST_CACHE_HEADERS,
   );
 }
 

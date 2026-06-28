@@ -7,7 +7,7 @@ import {
   recordDonation,
   validateDonationInput,
 } from "@/lib/donations";
-import { checkRateLimit, clientIp } from "@/lib/ratelimit";
+import { checkRateLimit, clientIp, hashIp } from "@/lib/ratelimit";
 import { cached } from "@/lib/cache";
 import { jsonWithEtag } from "@/lib/http";
 import { readJson, bodyErrorResponse, BODY_LIMIT_SMALL } from "@/lib/body";
@@ -138,7 +138,7 @@ export async function POST(request: Request) {
     const donation = await recordDonation({
       name: parsed.name,
       amountCents: parsed.amountCents,
-      ipHash: ip,
+      ipHash: hashIp(request),
       userAgent: request.headers.get("user-agent"),
     });
 

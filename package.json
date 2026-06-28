@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "node --import tsx scripts/gen-openapi.mts",
+    "prebuild": "npm run endpoints:check && node --import tsx scripts/gen-openapi.mts",
     "build": "next build",
     "openapi": "node --import tsx scripts/gen-openapi.mts",
+    "endpoints:check": "node scripts/check-endpoints.mjs",
     "start": "next start",
     "lint": "eslint",
     "lint:fix": "eslint --fix",

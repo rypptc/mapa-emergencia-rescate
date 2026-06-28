@@ -23,23 +23,29 @@ export * from "./hospitals-meta";
 
 const { hospitals, hospitalPatients } = schema;
 
-let _seedDone = false;
+// Promesa in-flight compartida: si dos requests concurrentes disparan el seed,
+// ambas esperan la MISMA promesa en vez de sembrar dos veces. Se marca "hecho"
+// solo tras éxito (audit A-1: antes _seedDone=true se ponía antes del loop, así
+// que un fallo dejaba el seed marcado como completo a medias).
+let _seedPromise: Promise<void> | null = null;
 
 async function seedHospitalsIfNeeded(): Promise<void> {
-  if (_seedDone) return;
-  _seedDone = true;
-  const rows = await getDb()
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(hospitals)
-    .where(sql`${hospitals.externalId} IS NOT NULL`);
-  const count = Number(rows[0]?.count ?? 0);
-  if (count >= hospitalsSeed.length) return;
+  if (_seedPromise) return _seedPromise;
+  _seedPromise = (async () => {
+    const rows = await getDb()
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(hospitals)
+      .where(sql`${hospitals.externalId} IS NOT NULL`);
+    const count = Number(rows[0]?.count ?? 0);
+    if (count >= hospitalsSeed.length) return;
 
-  for (const h of hospitalsSeed) {
-    try {
-      await getDb()
-        .insert(hospitals)
-        .values({
+    // UN solo INSERT multi-fila en vez de 174 round-trips seriales en el request
+    // path (audit A-1). ON CONFLICT (external_id) DO NOTHING lo hace idempotente.
+    const now = Date.now();
+    await getDb()
+      .insert(hospitals)
+      .values(
+        hospitalsSeed.map((h) => ({
           id: crypto.randomUUID(),
           externalId: h.externalId,
           name: h.name,
@@ -50,18 +56,20 @@ async function seedHospitalsIfNeeded(): Promise<void> {
           level: h.level,
           priorityZone: h.priorityZone,
           isPriority: h.isPriority,
-          createdAt: Date.now(),
-        })
-        // ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
-        // (target del índice único parcial).
-        .onConflictDoNothing({
-          target: hospitals.externalId,
-          where: sql`${hospitals.externalId} IS NOT NULL`,
-        });
-    } catch {
-      // un fallo puntual no detiene el resto
-    }
-  }
+          createdAt: now,
+        })),
+      )
+      .onConflictDoNothing({
+        target: hospitals.externalId,
+        where: sql`${hospitals.externalId} IS NOT NULL`,
+      });
+  })().catch((err) => {
+    // En error, liberamos la promesa para reintentar en la próxima request en
+    // vez de quedar marcado como sembrado a medias.
+    _seedPromise = null;
+    throw err;
+  });
+  return _seedPromise;
 }
 
 // Fila agregada que devuelven las consultas de hospitales (con conteo de
@@ -378,6 +386,7 @@ export interface PatientSearchResult {
   };
 }
 
+
 // Fila de paciente con columnas del hospital adjuntas (búsqueda global).
 type PatientWithHospitalRow = typeof hospitalPatients.$inferSelect & {
   hospitalName: string;
@@ -406,9 +415,13 @@ function rowToSearchResult(r: PatientWithHospitalRow): PatientSearchResult {
 export async function searchPatients(
   query: string,
   limit: number = 50,
+  opts: { publicSafe?: boolean } = {},
 ): Promise<PatientSearchResult[]> {
   const q = (query ?? "").trim();
   const cleanLimit = Math.min(Math.max(limit, 1), 200);
+  // publicSafe: solo busca por nombre (no por notas/contacto/cédula) para que un
+  // caller anónimo no pueda enumerar por cédula o teléfono parcial. Ver C-1.
+  const publicSafe = opts.publicSafe ?? false;
 
   if (hasDbEnv()) {
     await seedHospitalsIfNeeded();
@@ -449,14 +462,19 @@ export async function searchPatients(
     const digits = q.replace(/[^0-9]/g, "");
     const digitsLike = digits.length >= 4 ? `%${digits}%` : null;
 
+    // publicSafe: WHERE solo por nombre. Sin publicSafe (admin) se busca también
+    // por notas/contacto/cédula para la herramienta interna.
+    const whereSql = publicSafe
+      ? sql`WHERE LOWER(p.name) LIKE ${like}`
+      : sql`WHERE
+          LOWER(p.name) LIKE ${like}
+          OR LOWER(p.notes) LIKE ${like}
+          OR LOWER(p.contact) LIKE ${like}
+          OR (${digitsLike}::text IS NOT NULL
+              AND REGEXP_REPLACE(p.notes, '[^0-9]', '', 'g') LIKE ${digitsLike})`;
     const result = await getDb().execute(sql`
       ${baseSelect}
-      WHERE
-        LOWER(p.name) LIKE ${like}
-        OR LOWER(p.notes) LIKE ${like}
-        OR LOWER(p.contact) LIKE ${like}
-        OR (${digitsLike}::text IS NOT NULL
-            AND REGEXP_REPLACE(p.notes, '[^0-9]', '', 'g') LIKE ${digitsLike})
+      ${whereSql}
       ORDER BY
         CASE WHEN LOWER(p.name) LIKE ${like} THEN 0 ELSE 1 END,
         p.admitted_at DESC

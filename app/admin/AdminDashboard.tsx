@@ -521,13 +521,33 @@ export default function AdminDashboard() {
     if (!current || loadingDup) return;
     setLoadingDup(true);
     try {
-      const res = await fetch("/api/sync/duplicates?limit=50", {
+      // El reporte ya no corre inline (audit M-2): se encola y se hace
+      // status-poll hasta que termina (patrón Hermes/boahaus 202 + poll).
+      const enq = await fetch("/api/sync/duplicates?limit=50", {
+        method: "POST",
         headers: { "x-admin-token": current },
         cache: "no-store",
       });
-      if (res.ok) {
-        setDupReport(await res.json());
-        setDupOpen(true);
+      if (!enq.ok) return;
+      const { jobId } = await enq.json();
+      if (!jobId) return;
+
+      // Poll cada 1.5s hasta completed/failed o timeout (~90s).
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const sres = await fetch(
+          `/api/sync/status?jobId=${encodeURIComponent(jobId)}`,
+          { headers: { "x-admin-token": current }, cache: "no-store" },
+        );
+        if (!sres.ok) continue;
+        const st = await sres.json();
+        if (st.state === "completed") {
+          setDupReport(st.result);
+          setDupOpen(true);
+          return;
+        }
+        if (st.state === "failed") return; // falló; el botón permite reintentar
       }
     } catch {
       // se puede reintentar

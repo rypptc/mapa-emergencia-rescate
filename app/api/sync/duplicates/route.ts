@@ -1,25 +1,24 @@
 import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/admin";
-import { buildDuplicateReport } from "@/lib/sync/dedup";
+import { enqueueDuplicatesReport } from "@/worker/maintenance.queue";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
 
 /**
- * Reporte de posibles duplicados (read-only, sub-fase 6a). Solo detecta y
- * reporta; no modifica ni agrupa nada. Pensado para llamarse bajo demanda desde
- * el panel admin (no en cada poll).
+ * Reporte de posibles duplicados (read-only). El cálculo (CTE pesado, ~60s) ya no
+ * corre inline (audit M-2): se ENCOLA y el admin lee el resultado con status-poll
+ * (GET /api/sync/status?jobId=). Solo detecta/reporta; no modifica nada.
  *
- *   GET /api/sync/duplicates?source=<id>&limit=<n>
+ *   POST /api/sync/duplicates?source=<id>&limit=<n>  -> { jobId }
  *
  * Auth: header `x-admin-token`.
  */
 /**
  * @swagger
  * /api/sync/duplicates:
- *   get:
+ *   post:
  *     tags: [sync]
- *     summary: Reporte de posibles duplicados (read-only, requiere x-admin-token)
+ *     summary: Encola el reporte de posibles duplicados (requiere x-admin-token)
  *     parameters:
  *       - in: query
  *         name: source
@@ -32,23 +31,28 @@ export const maxDuration = 60;
  *         schema: { type: integer }
  *         description: Máximo de grupos de duplicados a devolver.
  *     responses:
- *       200:
- *         description: Reporte de grupos de posibles duplicados detectados.
+ *       202:
+ *         description: Reporte encolado. Lee el resultado con GET /api/sync/status?jobId=.
  *         content:
  *           application/json:
- *             schema: { type: object }
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 queued: { type: boolean }
+ *                 jobId: { type: string }
  *       401:
  *         description: No autorizado (falta o es inválido x-admin-token).
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
- *       500:
- *         description: Error al generar el reporte.
+ *       503:
+ *         description: No se pudo encolar.
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
  */
-export async function GET(request: Request) {
+export async function POST(request: Request) {
   if (!isAdminRequest(request)) {
     return NextResponse.json(
       { error: "No autorizado." },
@@ -63,14 +67,15 @@ export async function GET(request: Request) {
     Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
 
   try {
-    const report = await buildDuplicateReport({ source, limitGroups });
-    return NextResponse.json(report, {
-      headers: { "Cache-Control": "no-store" },
-    });
+    const jobId = await enqueueDuplicatesReport(source, limitGroups);
+    return NextResponse.json(
+      { ok: true, queued: true, jobId },
+      { status: 202, headers: { "Cache-Control": "no-store" } },
+    );
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Error al generar el reporte." },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
+      { error: err instanceof Error ? err.message : "No se pudo encolar." },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 }

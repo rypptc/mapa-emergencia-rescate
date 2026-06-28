@@ -36,7 +36,10 @@ services:
       DATABASE_URL: postgres://mapa_app:localdev@db:5432/app
       # Pin the driver explicitly (don't rely on host autodetection).
       DB_DRIVER: tcp
-      TRUSTED_IP_HEADER: x-forwarded-for
+      # Dev local: sin proxy de confianza, cae a x-real-ip. NO uses
+      # x-forwarded-for en prod (falsificable → anula el rate-limit).
+      TRUSTED_IP_HEADER: ""
+      IP_SALT: localdev-salt
     ports:
       - "3000:3000"
     depends_on:

@@ -170,10 +170,10 @@ export async function hubIngest(
 
     const { upserted, pendingPhoto } = await upsertBatch(type, mapped);
     res.upserted += upserted;
-    for (const hubId of pendingPhoto) {
-      await enqueueImage(type, hubId);
-      res.imagesQueued++;
-    }
+    // Encolar imágenes en paralelo: cada enqueue es un round-trip independiente
+    // a Redis (audit B-3). El INTER_PAGE_DELAY_MS domina el wall-clock igual.
+    await Promise.all(pendingPhoto.map((hubId) => enqueueImage(type, hubId)));
+    res.imagesQueued += pendingPhoto.length;
 
     cursor = page.next_cursor;
     // Guardamos el cursor en cada página: si se corta por presupuesto/error, la

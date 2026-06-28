@@ -17,6 +17,7 @@ import { hubIngest, setImageEnqueuer, type IngestMode } from "./jobs/hubIngest";
 import { hubImage } from "./jobs/hubImage";
 import { HUB_TYPES, type HubType } from "./hub/config";
 import { TABLES } from "./tables";
+import { recordDeadLetter, isExhausted } from "./deadletter";
 
 const PREFIX = process.env.QUEUE_PREFIX || "mapa";
 export const TABLES_QUEUE = "migrate-tables";
@@ -28,6 +29,12 @@ export const HUB_IMAGES_QUEUE = "hub-images";
 
 const REMOVE_ON_COMPLETE = Number(process.env.QUEUE_REMOVE_ON_COMPLETE || 1000);
 const REMOVE_ON_FAIL = Number(process.env.QUEUE_REMOVE_ON_FAIL || 5000);
+
+// Equivalente al visibility_timeout de Celery: el lockDuration por defecto de
+// BullMQ es 30s. Los jobs largos (ingest/tabla ~200s) lo excederían y BullMQ los
+// marcaría "stalled" y los RE-EJECUTARÍA en paralelo. Subimos el lock por encima
+// del job más largo. El worker renueva el lock mientras procesa.
+export const LONG_JOB_LOCK_MS = Number(process.env.LONG_JOB_LOCK_MS || 300_000);
 
 // External hosts (reconexión S3 etc.) get hammered by the photo job — cap the
 // global rate. Tune via env if we see 429s. Default: 20 jobs / second.
@@ -192,8 +199,23 @@ const tablesProcessor: Processor = async (job) => {
 const photosProcessor: Processor = async (job) =>
   migratePhoto(job.data.table as PhotoTable, job.data.id as string);
 
-const hubIngestProcessor: Processor = async (job) =>
-  hubIngest(job.data.type as HubType, job.data.mode as IngestMode);
+const hubIngestProcessor: Processor = async (job) => {
+  try {
+    return await hubIngest(job.data.type as HubType, job.data.mode as IngestMode);
+  } catch (err) {
+    // El hub devolvió 429 con Retry-After: respetamos la señal del servidor en
+    // vez del backoff fijo (audit B-4). moveToDelayed reprograma este intento
+    // exacto sin contar como fallo.
+    const retryAfter = (err as { retryAfter?: number })?.retryAfter;
+    if (typeof retryAfter === "number" && retryAfter > 0 && job.token) {
+      await job.moveToDelayed(Date.now() + retryAfter * 1000, job.token);
+      // BullMQ exige lanzar DelayedError para señalar "reprogramado, no fallido".
+      const { DelayedError } = await import("bullmq");
+      throw new DelayedError();
+    }
+    throw err;
+  }
+};
 
 const hubImageProcessor: Processor = async (job) =>
   hubImage(job.data.type as HubType, job.data.hubId as string);
@@ -209,6 +231,7 @@ export function createWorkers(): Worker[] {
     connection: conn,
     prefix: PREFIX,
     concurrency: tablesConcurrency,
+    lockDuration: LONG_JOB_LOCK_MS, // migrar una tabla grande puede tardar
   });
   const photosWorker = new Worker(PHOTOS_QUEUE, photosProcessor, {
     connection: conn,
@@ -221,6 +244,7 @@ export function createWorkers(): Worker[] {
     prefix: PREFIX,
     concurrency: hubIngestConcurrency,
     limiter: { max: HUB_INGEST_RATE_MAX, duration: HUB_INGEST_RATE_DURATION },
+    lockDuration: LONG_JOB_LOCK_MS, // un ciclo de ingesta pagina hasta ~200s
   });
   const hubImageWorker = new Worker(HUB_IMAGES_QUEUE, hubImageProcessor, {
     connection: conn,
@@ -235,9 +259,13 @@ export function createWorkers(): Worker[] {
     ["hub-ingest", hubIngestWorker],
     ["hub-images", hubImageWorker],
   ] as const) {
-    w.on("failed", (job, err) =>
-      console.error(`[${label}] job ${job?.id} failed:`, err?.message || err),
-    );
+    w.on("failed", (job, err) => {
+      console.error(`[${label}] job ${job?.id} failed:`, err?.message || err);
+      // Solo al AGOTAR reintentos lo mandamos al DLQ (no en cada intento).
+      if (isExhausted(job)) {
+        void recordDeadLetter(label, job, err, Date.now());
+      }
+    });
     w.on("error", (err) => console.error(`[${label}] worker error:`, err?.message || err));
   }
   tablesWorker.on("completed", (job, r) =>

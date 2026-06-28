@@ -1,6 +1,14 @@
-# Fixed baseline workers (min 2). The cluster-autoscaler manages ADDITIONAL
-# workers on top of these via its own pool (see autoscaler.tf) — these are the
-# always-on floor so the app always has >=2 nodes for zero-downtime rolls.
+# Workers FIJOS gestionados por tofu. MODELO EFÍMERO: k3s_worker_count default 0
+# → el cluster-autoscaler (infra/k8s/cluster-autoscaler.yaml) es dueño de TODOS
+# los workers. Con count=0 este recurso no crea nada.
+#
+# ⚠️ ORDEN DE MIGRACIÓN (evitar outage): NO bajes el count a 0 hasta que el CA
+# esté desplegado, sano y manteniendo su piso (min=2). Si destruyes los workers
+# fijos ANTES de que el CA tenga nodos vivos, el clúster se queda sin workers
+# hasta que el CA aprovisione (2-5 min) — los pods quedan Pending mientras tanto.
+# Secuencia segura: (1) desplegar CA con max para crear su pool, (2) confirmar
+# 2 nodos del pool Ready, (3) recién entonces aplicar count=0. Ver el runbook en
+# docs/rfcs/0004.
 resource "hcloud_server" "k3s_worker" {
   count        = var.k3s_worker_count
   name         = "mapa-worker-${count.index + 1}"

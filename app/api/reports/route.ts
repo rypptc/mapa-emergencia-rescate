@@ -9,6 +9,7 @@ import { checkRateLimit, clientIp } from "@/lib/ratelimit";
 import { cached } from "@/lib/cache";
 import { jsonWithEtag } from "@/lib/http";
 import { readJson, bodyErrorResponse, BODY_LIMIT_PHOTO } from "@/lib/body";
+import { isAllowedImageDataUrl } from "@/lib/image";
 import { REPORT_TYPE_KEYS, type NewReport, type ReportType } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -104,7 +105,9 @@ export async function POST(request: Request) {
 
   const photo = typeof body.photo === "string" ? body.photo : null;
   if (photo) {
-    if (!/^data:image\/(jpeg|png|webp);base64,/.test(photo)) {
+    // Validador central (audit M-6): antes era una regex más débil (sin $ ni
+    // charset) que aceptaba basura al final del data-URL.
+    if (!isAllowedImageDataUrl(photo)) {
       return NextResponse.json(
         { error: "La foto debe ser una imagen JPG, PNG o WebP válida." },
         { status: 400 },

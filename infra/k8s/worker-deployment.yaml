@@ -32,8 +32,13 @@ spec:
     spec:
       imagePullSecrets:
         - name: ghcr-pull
-      # Workers drain in-flight jobs on SIGTERM (worker/index.ts). Give them room.
-      terminationGracePeriodSeconds: 120
+      # Cadena de drenado alineada (patrón Hermes/Celery: cada capa > la interna):
+      #   job más largo (sync chunked, HUB/SYNC_TIME_BUDGET_MS ~200s)
+      #     < worker.close() cap (WORKER_CLOSE_TIMEOUT_MS=210s, worker/index.ts)
+      #       < terminationGracePeriodSeconds (240s) < SIGKILL de k8s.
+      # Así un redeploy nunca corta un job a la mitad; si aun así pasa, BullMQ lo
+      # reintenta (jobs idempotentes + checkpointed por cursor).
+      terminationGracePeriodSeconds: 240
       containers:
         - name: worker
           image: ghcr.io/OWNER/REPO-worker:latest

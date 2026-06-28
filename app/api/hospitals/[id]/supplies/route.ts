@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { BODY_LIMIT_TEXT, bodyErrorResponse, readJson } from "@/lib/body";
-import { invalidate } from "@/lib/cache";
+import { cached, invalidate } from "@/lib/cache";
+import { jsonWithEtag } from "@/lib/http";
 import { getHospital } from "@/lib/hospitals";
 import {
   getPublicHospitalSupplySummary,
@@ -92,7 +93,7 @@ const PUBLIC_CACHE_HEADERS = {
  *             schema: { $ref: '#/components/schemas/Error' }
  */
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -103,8 +104,13 @@ export async function GET(
       { status: 404, headers: PUBLIC_CACHE_HEADERS },
     );
   }
-  const supply = await getPublicHospitalSupplySummary(hospital.id);
-  return NextResponse.json({ hospital, supply }, { headers: PUBLIC_CACHE_HEADERS });
+  // GET público polleado: cache en proceso por ventana + jsonWithEtag (304) como
+  // reports/missing/chat — el CDN absorbe el edge, esto evita pegar a la DB en
+  // cada miss de origen y corto-circuita con 304 cuando no cambió nada.
+  const supply = await cached(`hsupply:${hospital.id}`, 10_000, () =>
+    getPublicHospitalSupplySummary(hospital.id),
+  );
+  return jsonWithEtag(request, { hospital, supply }, PUBLIC_CACHE_HEADERS);
 }
 
 export async function POST(

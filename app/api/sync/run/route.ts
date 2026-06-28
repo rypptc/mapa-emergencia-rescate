@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/admin";
-import { runAllSources, runAllSourcesChunked } from "@/lib/sync/engine";
+import { enqueueSourceSync, type SyncMode } from "@/worker/sourcesSync.queue";
+import { enabledSources, getSource } from "@/lib/sync/sources";
 
 export const dynamic = "force-dynamic";
-// Traer fuentes grandes + upsert puede tardar; ampliamos el límite de función.
-export const maxDuration = 300;
 
 /**
  * Disparo manual de la sincronización (panel admin).
@@ -50,33 +49,32 @@ export const maxDuration = 300;
  *         schema: { type: integer, minimum: 1 }
  *         description: Tope de páginas por corrida (solo con mode=chunk).
  *     responses:
- *       200:
- *         description: Resumen de la corrida con totales y resultado por fuente.
+ *       202:
+ *         description: >-
+ *           Corrida ENCOLADA. El sync ya no corre inline (audit M-2): se procesa
+ *           en el worker. Consulta el estado con GET /api/sync/status?jobId=.
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
  *                 ok: { type: boolean }
- *                 dryRun: { type: boolean }
- *                 totals:
- *                   type: object
- *                   properties:
- *                     fetched: { type: integer }
- *                     inserted: { type: integer }
- *                     updated: { type: integer }
- *                     skipped: { type: integer }
- *                     errors: { type: integer }
- *                 results:
+ *                 queued: { type: boolean }
+ *                 jobIds:
  *                   type: array
- *                   items: { type: object }
+ *                   items: { type: string }
+ *       400:
+ *         description: Fuente desconocida.
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Error' }
  *       401:
  *         description: No autorizado (falta o es inválido x-admin-token).
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
- *       500:
- *         description: Error al sincronizar.
+ *       503:
+ *         description: No se pudo encolar (cola no disponible).
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Error' }
@@ -95,42 +93,36 @@ export async function POST(request: Request) {
   const limitParam = Number(params.get("limit"));
   const limit =
     Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
-  const chunk = params.get("mode") === "chunk";
+  // mode=chunk → procesa por páginas con cursor; si no, corrida completa.
+  const mode: SyncMode = params.get("mode") === "chunk" ? "chunk" : "full";
   const pagesParam = Number(params.get("pages"));
   const pagesPerRun =
     Number.isFinite(pagesParam) && pagesParam > 0 ? pagesParam : undefined;
 
-  try {
-    const results = chunk
-      ? await runAllSourcesChunked({
-          pagesPerRun,
-          sourceIds: source ? [source] : undefined,
-        })
-      : await runAllSources({
-          dryRun,
-          limit,
-          sourceIds: source ? [source] : undefined,
-        });
-
-    const totals = results.reduce(
-      (acc, r) => ({
-        fetched: acc.fetched + r.fetched,
-        inserted: acc.inserted + r.inserted,
-        updated: acc.updated + r.updated,
-        skipped: acc.skipped + r.skipped,
-        errors: acc.errors + r.errors,
-      }),
-      { fetched: 0, inserted: 0, updated: 0, skipped: 0, errors: 0 },
-    );
-
+  // Validar la fuente (si se pidió una) antes de encolar.
+  if (source && !getSource(source)) {
     return NextResponse.json(
-      { ok: results.every((r) => r.ok), dryRun, totals, results },
-      { headers: { "Cache-Control": "no-store" } },
+      { error: `Fuente desconocida: ${source}` },
+      { status: 400, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const sources = source ? [getSource(source)!] : enabledSources();
+
+  try {
+    // Encolar un job por fuente y devolver de inmediato (patrón 202, audit M-2).
+    const jobIds = await Promise.all(
+      sources.map((s) =>
+        enqueueSourceSync({ sourceId: s.id, mode, dryRun, limit, pagesPerRun }),
+      ),
+    );
+    return NextResponse.json(
+      { ok: true, queued: true, jobIds },
+      { status: 202, headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Error al sincronizar." },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
+      { error: err instanceof Error ? err.message : "No se pudo encolar." },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 }

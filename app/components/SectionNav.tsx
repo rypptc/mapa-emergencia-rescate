@@ -9,6 +9,7 @@ import PsychologyHelpButton from "./PsychologyHelpButton";
 import { DonateNavButton } from "./DonateButton";
 import { SiteBrand } from "./HeroSection";
 import { toggleTheme } from "./ThemeProvider";
+import { useMissingStats } from "./useMissingStats";
 import {
   MOBILE_BAR_LINKS,
   PRIMARY_MAP_LINK,
@@ -77,51 +78,11 @@ function useIosScrollLock(active: boolean) {
 }
 
 function usePeopleTotals() {
-  const [missing, setMissing] = useState<number | null>(null);
-  const [found, setFound] = useState<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    const load = async () => {
-      try {
-        const res = await fetch("/api/missing/stats", { cache: "no-cache" });
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        const stats = data.stats;
-        if (cancelled || !stats) return;
-        setMissing(stats.active ?? 0);
-        setFound(stats.found ?? 0);
-      } catch {}
-    };
-
-    const start = () => {
-      if (intervalId !== null) return;
-      load();
-      intervalId = setInterval(load, 60_000);
-    };
-    const stop = () => {
-      if (intervalId !== null) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") start();
-      else stop();
-    };
-
-    onVisibility();
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      cancelled = true;
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, []);
-
-  return { missing, found };
+  // Store compartido: HeroDesktopNav + MobileStickyNav (+ EmergencyApp) montan
+  // este hook a la vez; antes cada uno hacía su propio fetch+interval. Ahora un
+  // solo poll para toda la página (ver useMissingStats).
+  const stats = useMissingStats();
+  return { missing: stats?.active ?? null, found: stats?.found ?? null };
 }
 
 function compactBadge(value: string): string {

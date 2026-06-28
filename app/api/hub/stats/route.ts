@@ -68,30 +68,34 @@ export async function GET(request: Request) {
 
   const result = await cached("hub:stats", 30_000, async () => {
     const db = getDb();
-    const byType: HubTypeStat[] = [];
-    for (const { type, table, hasPhoto } of TABLES) {
-      // sql.raw para el nombre de tabla (validado: viene de la lista cerrada de arriba).
-      const photoCols = hasPhoto
-        ? sql`, count(*) FILTER (WHERE photo_url IS NOT NULL)::int AS photos,
-               count(*) FILTER (WHERE photo_broken)::int AS broken`
-        : sql``;
-      const res = await db.execute(
-        sql`SELECT count(*)::int AS count,
-                   max(ingested_at) AS last_ingested${photoCols}
-            FROM ${sql.raw(`"${table}"`)}`,
-      );
-      const rows = (res as unknown as { rows?: Record<string, unknown>[] }).rows ??
-        (res as unknown as Record<string, unknown>[]);
-      const r = (Array.isArray(rows) ? rows[0] : undefined) ?? {};
-      byType.push({
-        type,
-        count: Number(r.count ?? 0),
-        ...(hasPhoto
-          ? { photos: Number(r.photos ?? 0), broken: Number(r.broken ?? 0) }
-          : {}),
-        lastIngestedAt: r.last_ingested != null ? Number(r.last_ingested) : null,
-      });
-    }
+    // Los 5 counts son independientes → en paralelo (audit M-3): la latencia es
+    // el MAX de un round-trip, no la suma de 5. En neon-http cada execute() es un
+    // hop HTTPS, así que esto es ~5x más rápido en el miss.
+    const byType: HubTypeStat[] = await Promise.all(
+      TABLES.map(async ({ type, table, hasPhoto }) => {
+        // sql.raw para el nombre de tabla (validado: viene de la lista cerrada).
+        const photoCols = hasPhoto
+          ? sql`, count(*) FILTER (WHERE photo_url IS NOT NULL)::int AS photos,
+                 count(*) FILTER (WHERE photo_broken)::int AS broken`
+          : sql``;
+        const res = await db.execute(
+          sql`SELECT count(*)::int AS count,
+                     max(ingested_at) AS last_ingested${photoCols}
+              FROM ${sql.raw(`"${table}"`)}`,
+        );
+        const rows = (res as unknown as { rows?: Record<string, unknown>[] }).rows ??
+          (res as unknown as Record<string, unknown>[]);
+        const r = (Array.isArray(rows) ? rows[0] : undefined) ?? {};
+        return {
+          type,
+          count: Number(r.count ?? 0),
+          ...(hasPhoto
+            ? { photos: Number(r.photos ?? 0), broken: Number(r.broken ?? 0) }
+            : {}),
+          lastIngestedAt: r.last_ingested != null ? Number(r.last_ingested) : null,
+        };
+      }),
+    );
     const total = byType.reduce((a, b) => a + b.count, 0);
     return { total, byType };
   });

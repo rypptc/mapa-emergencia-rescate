@@ -83,7 +83,13 @@ variable "k3s_master_private_ip" {
   default = "10.0.1.5"
 }
 variable "k3s_worker_count" {
-  description = "Fixed/baseline workers (the autoscaler manages 2..max on top via its own pool)."
+  description = <<-EOT
+    Workers FIJOS gestionados por tofu. Modelo TOTALMENTE EFÍMERO: default 0 —
+    el cluster-autoscaler (infra/k8s/cluster-autoscaler.yaml) es dueño de TODOS
+    los workers vía su pool `--nodes=2:5:...` (min=2 piso, max=5 techo), creando
+    y destruyendo VPS bajo demanda. Así no se gestionan nodos a mano.
+    Pon >0 SOLO si quieres una base fija además del pool del CA (no recomendado).
+  EOT
   type        = number
-  default     = 2
+  default     = 0
 }

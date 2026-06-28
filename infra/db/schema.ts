@@ -110,6 +110,12 @@ export const missingPersons = pgTable(
       .where(
         sql`photo_migrated_at IS NULL AND (photo IS NOT NULL OR photo_external_url IS NOT NULL)`,
       ),
+    // Árbitro del ON CONFLICT (source, external_id) de upsertExternalMissingBatch.
+    // Ya existe en prod creado out-of-band; lo declaramos para que un rebuild
+    // limpio lo tenga. Nombre fijado para coincidir con el de prod (no-op).
+    uniqueIndex("missing_persons_source_external_id_idx")
+      .on(t.source, t.externalId)
+      .where(sql`external_id IS NOT NULL`),
   ],
 );
 

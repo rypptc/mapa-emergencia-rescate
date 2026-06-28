@@ -76,6 +76,7 @@ const SCHEMAS = {
       id: { type: "string" },
       name: { type: "string" },
       age: { type: "integer", nullable: true },
+      nationality: { type: "string", nullable: true },
       description: { type: "string" },
       lastSeen: { type: "string" },
       contact: { type: "string" },

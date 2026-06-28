@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { confirmReport } from "@/lib/store";
-import { checkRateLimit, clientIp } from "@/lib/ratelimit";
+import { checkRateLimit, clientIp, hashIp } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -61,7 +61,10 @@ export async function POST(
   }
   const { id } = await params;
   try {
-    const result = await confirmReport(id, ip);
+    // Persistimos/deduplicamos por hash de IP, no por IP cruda (contexto
+    // humanitario). El hash es determinístico → la dedup (report_id, ip_hash)
+    // sigue funcionando.
+    const result = await confirmReport(id, hashIp(request));
     if (result === null) {
       return NextResponse.json(
         { ok: false, error: "Ya confirmaste este reporte." },

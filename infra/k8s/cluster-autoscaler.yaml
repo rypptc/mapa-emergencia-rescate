@@ -1,0 +1,186 @@
+# Cluster Autoscaler (Hetzner cloud provider) — escala NODOS (VPS efímeros).
+# Corre DENTRO de k3s como un pod. Vigila pods Pending → llama a la API de
+# Hetzner para crear un VPS → cloud-init lo une a k3s → los pods se programan.
+# Al quedar un nodo vacío y sin uso por un tiempo, lo drena y lo DESTRUYE.
+#
+# MODELO TOTALMENTE EFÍMERO: no hay workers fijos en tofu (k3s_worker_count=0).
+# El CA es dueño de TODOS los workers vía su pool `--nodes=<min>:<max>:...`.
+# `min` se MANTIENE como piso (siempre >= min workers vivos).
+#
+# Arranque seguro (chicken-and-egg): el CA corre en el MASTER (control-plane,
+# siempre encendido), así que funciona incluso con 0 workers — puede crear el
+# primero. nodeSelector + toleration lo fijan al master.
+#
+# Versionado: la imagen del CA sigue el minor de k8s. Cluster en v1.36 →
+# cluster-autoscaler:v1.36.x. Bumpear junto con k3s.
+#
+# Config de Hetzner (HCLOUD_TOKEN, HCLOUD_CLUSTER_CONFIG, red/firewall/ssh) se
+# inyecta vía el Secret `cluster-autoscaler-hcloud`, que CREA el workflow de
+# deploy a partir de los GitHub secrets + el cloud-init de k3s-agent (NO se
+# commitea ningún secreto aquí). Ver deploy-hetzner.yml.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+rules:
+  - apiGroups: [""]
+    resources: ["events", "endpoints"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames: ["cluster-autoscaler"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["watch", "list", "get", "update"]
+  - apiGroups: [""]
+    resources:
+      ["namespaces", "pods", "services", "replicationcontrollers", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["batch", "extensions"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["watch", "list"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "replicasets", "statefulsets"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities"]
+    verbs: ["watch", "list", "get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list", "watch", "get", "create", "delete", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "update", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+      annotations:
+        # El propio CA no debe ser desalojado por un scale-down que él mismo
+        # decide (corre en el master de todos modos, pero defensa extra).
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: cluster-autoscaler
+      priorityClassName: system-cluster-critical
+      # --- Fijar al MASTER (control-plane, siempre vivo) ---
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: cluster-autoscaler
+          # Pin al minor de k8s del clúster (v1.36). Bumpear con k3s.
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.36.0
+          command:
+            - ./cluster-autoscaler
+            - --cloud-provider=hetzner
+            - --stderrthreshold=info
+            - --v=2
+            # Pool de workers EFÍMEROS: min:max:tipo:región:nombre.
+            # min=2 -> piso siempre vivo. max=5 -> techo de ráfaga (cx23 = 2vCPU/4GB).
+            - --nodes=2:5:cx23:hel1:mapa-pool
+            # --- guardrails de scale-down ---
+            # Espera 10 min de baja utilización antes de retirar un nodo (evita
+            # flapping y dar tiempo a drenar).
+            - --scale-down-unneeded-time=10m
+            - --scale-down-delay-after-add=10m
+            - --scale-down-utilization-threshold=0.5
+            # Permite retirar nodos aunque corran pods con almacenamiento local
+            # efímero (nuestros pods no usan PVCs locales; sin esto, los pods de
+            # kube-system con emptyDir bloquearían TODO scale-down).
+            - --skip-nodes-with-local-storage=false
+            # No retires nodos con pods de kube-system (coredns, etc.) salvo que
+            # puedan reprogramarse — protege servicios del sistema.
+            - --skip-nodes-with-system-pods=true
+            # Expander: al necesitar un nodo, elige el pool más barato (solo hay
+            # uno, pero explícito por claridad).
+            - --expander=least-waste
+            - --balance-similar-node-groups=false
+          env:
+            # Token de Hetzner + config del pool (cloud-init/red/firewall/ssh),
+            # del Secret que crea el workflow. NO commitear secretos.
+            - name: HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cluster-autoscaler-hcloud
+                  key: token
+            - name: HCLOUD_CLUSTER_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: cluster-autoscaler-hcloud
+                  key: cluster-config
+            - name: HCLOUD_NETWORK
+              value: "mapa-net"
+            - name: HCLOUD_FIREWALL
+              value: "mapa-db-fw"
+            - name: HCLOUD_SSH_KEY
+              value: "mapa-key"
+            # IP pública ON: igual que los workers actuales (no hay NAT gateway,
+            # y los nodos necesitan egress para instalar k3s [get.k3s.io] y bajar
+            # imágenes [registry.k8s.io, ghcr.io]). El tráfico a DB/Valkey sigue
+            # yendo por la red privada. El firewall mapa-db-fw solo abre 22/6443
+            # al público; nada más queda expuesto.
+            - name: HCLOUD_PUBLIC_IPV4
+              value: "true"
+            - name: HCLOUD_PUBLIC_IPV6
+              value: "false"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              memory: "256Mi"

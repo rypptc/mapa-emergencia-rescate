@@ -43,7 +43,8 @@ const LIST_CACHE_HEADERS = {
  *         description: Texto de búsqueda
  *       - in: query
  *         name: limit
- *         schema: { type: integer, default: 500 }
+ *         schema: { type: integer, default: 50, maximum: 1000 }
+ *         description: Máximo de hospitales (default 50; antes 500 — audit R-2).
  *     responses:
  *       200:
  *         description: Hospitales y, opcionalmente, estados
@@ -114,7 +115,7 @@ export async function GET(request: Request) {
 
   const state = params.get("state") ?? undefined;
   const search = params.get("q") ?? undefined;
-  const limit = Number(params.get("limit") ?? "500");
+  const limit = Number(params.get("limit") ?? "50");
   const key = `hospitals:${state ?? ""}:${zone ?? ""}:${search ?? ""}:${limit}:${wantsStates ? 1 : 0}`;
 
   const { hospitals, states } = await cached(key, 10_000, async () => {

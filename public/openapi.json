@@ -111,6 +111,10 @@
             "type": "integer",
             "nullable": true
           },
+          "nationality": {
+            "type": "string",
+            "nullable": true
+          },
           "description": {
             "type": "string"
           },
@@ -2736,8 +2740,10 @@
             "name": "limit",
             "schema": {
               "type": "integer",
-              "default": 500
-            }
+              "default": 50,
+              "maximum": 1000
+            },
+            "description": "Máximo de hospitales (default 50; antes 500 — audit R-2)."
           }
         ],
         "responses": {
@@ -3777,6 +3783,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Demasiadas peticiones (rate limit)"
           }
         }
       }
@@ -4169,8 +4178,8 @@
         ],
         "summary": "Dispara el cron de sincronización de fuentes externas (Auth Bearer CRON_SECRET o admin)",
         "responses": {
-          "200": {
-            "description": "Resumen del chunk procesado en esta invocación",
+          "202": {
+            "description": "Sync encolado (un job chunked por fuente). Estado vía /api/sync/status.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4179,30 +4188,13 @@
                     "ok": {
                       "type": "boolean"
                     },
-                    "totals": {
-                      "type": "object",
-                      "properties": {
-                        "fetched": {
-                          "type": "integer"
-                        },
-                        "inserted": {
-                          "type": "integer"
-                        },
-                        "updated": {
-                          "type": "integer"
-                        },
-                        "skipped": {
-                          "type": "integer"
-                        },
-                        "errors": {
-                          "type": "integer"
-                        }
-                      }
+                    "queued": {
+                      "type": "boolean"
                     },
-                    "results": {
+                    "jobIds": {
                       "type": "array",
                       "items": {
-                        "type": "object"
+                        "type": "string"
                       }
                     }
                   }
@@ -4220,8 +4212,8 @@
               }
             }
           },
-          "500": {
-            "description": "Error en el cron",
+          "503": {
+            "description": "No se pudo encolar",
             "content": {
               "application/json": {
                 "schema": {
@@ -4234,11 +4226,11 @@
       }
     },
     "/api/sync/duplicates": {
-      "get": {
+      "post": {
         "tags": [
           "sync"
         ],
-        "summary": "Reporte de posibles duplicados (read-only, requiere x-admin-token)",
+        "summary": "Encola el reporte de posibles duplicados (requiere x-admin-token)",
         "parameters": [
           {
             "in": "query",
@@ -4260,12 +4252,23 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Reporte de grupos de posibles duplicados detectados.",
+          "202": {
+            "description": "Reporte encolado. Lee el resultado con GET /api/sync/status?jobId=.",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "queued": {
+                      "type": "boolean"
+                    },
+                    "jobId": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -4280,8 +4283,8 @@
               }
             }
           },
-          "500": {
-            "description": "Error al generar el reporte.",
+          "503": {
+            "description": "No se pudo encolar.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4312,8 +4315,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Resumen de la corrida de geocodificación.",
+          "202": {
+            "description": "Geocode encolado. Estado vía GET /api/sync/status?jobId=.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4321,6 +4324,12 @@
                   "properties": {
                     "ok": {
                       "type": "boolean"
+                    },
+                    "queued": {
+                      "type": "boolean"
+                    },
+                    "jobId": {
+                      "type": "string"
                     }
                   }
                 }
@@ -4337,8 +4346,8 @@
               }
             }
           },
-          "500": {
-            "description": "Error al geocodificar.",
+          "503": {
+            "description": "No se pudo encolar.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4469,8 +4478,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Resumen de la corrida con totales y resultado por fuente.",
+          "202": {
+            "description": "Corrida ENCOLADA. El sync ya no corre inline (audit M-2): se procesa en el worker. Consulta el estado con GET /api/sync/status?jobId=.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4479,36 +4488,26 @@
                     "ok": {
                       "type": "boolean"
                     },
-                    "dryRun": {
+                    "queued": {
                       "type": "boolean"
                     },
-                    "totals": {
-                      "type": "object",
-                      "properties": {
-                        "fetched": {
-                          "type": "integer"
-                        },
-                        "inserted": {
-                          "type": "integer"
-                        },
-                        "updated": {
-                          "type": "integer"
-                        },
-                        "skipped": {
-                          "type": "integer"
-                        },
-                        "errors": {
-                          "type": "integer"
-                        }
-                      }
-                    },
-                    "results": {
+                    "jobIds": {
                       "type": "array",
                       "items": {
-                        "type": "object"
+                        "type": "string"
                       }
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Fuente desconocida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -4523,8 +4522,84 @@
               }
             }
           },
-          "500": {
-            "description": "Error al sincronizar.",
+          "503": {
+            "description": "No se pudo encolar (cola no disponible).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sync/status": {
+      "get": {
+        "tags": [
+          "sync"
+        ],
+        "summary": "Estado de un job de sync encolado (status-poll, requiere x-admin-token)",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "jobId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "jobId devuelto por POST /api/sync/run (o el cron)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Estado + resultado del job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "jobId": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "description": "waiting|active|completed|failed|delayed"
+                    },
+                    "progress": {},
+                    "result": {},
+                    "failedReason": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Falta jobId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job no encontrado (expiró o id inválido).",
             "content": {
               "application/json": {
                 "schema": {

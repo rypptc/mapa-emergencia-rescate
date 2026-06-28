@@ -19,7 +19,11 @@ export function targetPool(): Pool {
   if (_target) return _target;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL (target / Hetzner app DB) not set");
-  _target = new Pool({ connectionString: url, max: 8 });
+  // max ≥ suma de concurrencias de los workers que pegan al target (audit M-4).
+  // Ya no se retiene conexión a través de I/O de red (ver migratePhoto), pero
+  // varias colas concurrentes igual necesitan holgura. Tunable por env.
+  const max = Number(process.env.TARGET_POOL_MAX || 16);
+  _target = new Pool({ connectionString: url, max });
   return _target;
 }
 

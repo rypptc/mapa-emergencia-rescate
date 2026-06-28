@@ -17,6 +17,16 @@ app/api/**/route.ts  --(@swagger JSDoc)-->  next-swagger-doc
    /api/openapi  sirve el JSON   ·   /api/docs  carga Swagger UI apuntando a él
 ```
 
+> **Enforcement automático:** `prebuild` corre primero `npm run endpoints:check`
+> (`scripts/check-endpoints.mjs`), que FALLA el build/CI si cualquier `route.ts`
+> bajo `app/api/**` rompe las reglas duras: falta `@swagger`, handler no `async`,
+> uso de `maxDuration` (I/O largo inline → debe ir a cola), o llamadas síncronas
+> bloqueantes. También avisa (sin romper) de mutaciones sin auth/rate-limit y GET
+> sin cache. Reglas completas en AGENTS.md ("Crear un endpoint"). Si un endpoint
+> SIRVE la doc (`/api/openapi`, `/api/docs`), está exento del `@swagger` vía
+> `SWAGGER_EXEMPT`; para silenciar un AVISO heurístico legítimo usa el comentario
+> `// endpoint-check: ok`.
+
 - La spec se genera en **build** (`prebuild` corre `scripts/gen-openapi.mts`),
   no en runtime, porque con `output: standalone` los fuentes de `app/api/**` no
   están en el contenedor. El resultado (`public/openapi.json`) sí se empaqueta.

@@ -79,6 +79,17 @@ export default function MissingPersons() {
   const requestIdRef = useRef(0);
   const listTopRef = useRef<HTMLDivElement | null>(null);
   const initialPageRef = useRef(true);
+  // Caché de páginas visitadas (memoria, por sesión): volver a una página ya
+  // vista es INSTANTÁNEO (sin esperar al servidor). Se revalida en segundo plano
+  // (stale-while-revalidate). Clave: status:query:page. Se limpia al cambiar de
+  // término de búsqueda. ponytail: Map simple, sin librería.
+  const pageCacheRef = useRef<
+    Map<string, { people: MissingPerson[]; total: number; totalPages: number; totalCapped: boolean }>
+  >(new Map());
+  const cacheKey = useCallback(
+    (p: number) => `active:${debouncedQuery.trim()}:${p}`,
+    [debouncedQuery],
+  );
 
   // Debounce de la búsqueda: al cambiar el término volvemos a la página 1.
   useEffect(() => {
@@ -121,12 +132,21 @@ export default function MissingPersons() {
         if (requestId !== requestIdRef.current) return;
         const nextPeople = data.people ?? [];
         const nextTotal = data.total ?? 0;
+        const nextTotalPages = data.totalPages ?? 1;
+        const nextCapped = Boolean(data.totalCapped);
         setPeople(nextPeople);
         setTotal(nextTotal);
-        setTotalCapped(Boolean(data.totalCapped));
-        setTotalPages(data.totalPages ?? 1);
+        setTotalCapped(nextCapped);
+        setTotalPages(nextTotalPages);
         setPersistent(Boolean(data.persistent));
         setLastFetchAt(Date.now());
+        // Guardar en caché para que volver a esta página sea instantáneo.
+        pageCacheRef.current.set(cacheKey(page), {
+          people: nextPeople,
+          total: nextTotal,
+          totalPages: nextTotalPages,
+          totalCapped: nextCapped,
+        });
         if (debouncedQuery.trim()) {
           const resultsKey = `${debouncedQuery.trim()}:${page}:${nextTotal}`;
           if (lastTrackedResultsRef.current !== resultsKey) {
@@ -148,8 +168,26 @@ export default function MissingPersons() {
         if (manual) setRefreshing(false);
       }
     },
-    [page, debouncedQuery],
+    [page, debouncedQuery, cacheKey],
   );
+
+  // Al cambiar el término de búsqueda, la caché de páginas vieja ya no aplica.
+  useEffect(() => {
+    pageCacheRef.current.clear();
+  }, [debouncedQuery]);
+
+  // Al cambiar de página: si ya la visitamos, mostramos la caché AL INSTANTE
+  // (stale-while-revalidate); el poll/load de fondo la refresca. Evita el parpadeo
+  // y la espera al servidor en 1→2→1.
+  useEffect(() => {
+    const cached = pageCacheRef.current.get(cacheKey(page));
+    if (cached) {
+      setPeople(cached.people);
+      setTotal(cached.total);
+      setTotalPages(cached.totalPages);
+      setTotalCapped(cached.totalCapped);
+    }
+  }, [page, cacheKey]);
 
   // Re-render del indicador "actualizado hace X" cada 5 s sin pedir red.
   useEffect(() => {

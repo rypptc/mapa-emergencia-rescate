@@ -1,28 +1,42 @@
-# App Deployment — the Next.js full-stack app (UI + /api route handlers).
-# This is the "cattle": immutable pods replaced on every deploy.
+# App Deployments — el MISMO image de Next.js desplegado como DOS tiers:
+#   - web : sirve UI/SSR + (también responde /api porque es el mismo server.js).
+#           Lo enruta el LB público (terremoto…).
+#   - api : sirve la superficie /api para consumidores EXTERNOS (scrapers,
+#           integraciones). Lo enruta un LB aparte (api.terremoto…).
 #
-# Zero-downtime is achieved entirely by the fields below:
-#   - strategy maxUnavailable:0 / maxSurge:1  -> a new pod is created and must
-#     become Ready BEFORE any old pod is removed. Always >=1 serving.
-#   - readinessProbe /api/readyz             -> "Ready" means the DB is
-#     reachable, so traffic only flows to pods that can actually serve.
-#   - terminationGracePeriodSeconds          -> in-flight requests finish
-#     before the old pod is killed (connection draining).
+# ¿Por qué dos Deployments del mismo image y no dos servicios/código? Next.js
+# (standalone) sirve TODO desde un solo server.js; no hay "backend" que extraer.
+# Separarlos en dos Deployments + dos Services da AISLAMIENTO de blast-radius y
+# escalado independiente (HPA propio por tier, ver hpa.yaml): una ráfaga de un
+# consumidor de API no puede ahogar el render del front durante una emergencia.
+# Cero cambios de código, cero CORS para el front (sigue usando /api same-origin).
 #
-# The image tag is patched per-deploy by CI: `kubectl set image ... :<sha>`.
+# Zero-downtime (ambos tiers):
+#   - maxUnavailable:0 / maxSurge:1 -> el pod nuevo debe estar Ready ANTES de
+#     quitar uno viejo. Siempre >=1 sirviendo.
+#   - readinessProbe /api/readyz -> el LB solo enruta a pods que pasan el check
+#     de DB. Durante un rollout, el LB drena el viejo (readiness deja de pasar en
+#     preStop) y solo manda tráfico al nuevo.
+#   - cluster-autoscaler (infra/tofu/autoscaler.tf) arranca VPS efímeros cuando
+#     los pods nuevos no caben, y destruye los viejos al drenar (graceful).
+#
+# CI parchea el tag del image por-deploy con `kubectl set image` en AMBOS.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: app
+  name: web
   namespace: mapa
   labels:
     app: mapa
+    tier: web
 spec:
-  replicas: 2
+  replicas: 3
   revisionHistoryLimit: 5
   selector:
     matchLabels:
       app: mapa
+      tier: web
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -32,15 +46,26 @@ spec:
     metadata:
       labels:
         app: mapa
+        tier: web
     spec:
-      # GHCR es privado: secret de pull creado/refrescado por el workflow.
       imagePullSecrets:
         - name: ghcr-pull
+      # Reparte réplicas entre nodos (resiliencia + ayuda al autoscaler a
+      # justificar un nodo nuevo). `preferred`, no `required`, para no bloquear
+      # el scheduling si hay un solo nodo durante un cold-start.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: mapa
+                    tier: web
+                topologyKey: kubernetes.io/hostname
       terminationGracePeriodSeconds: 40
       containers:
         - name: app
-          # CI overwrites this tag with ghcr.io/<owner>/<repo>:<sha>.
-          # `:latest` is only a placeholder so `kubectl apply` works first time.
           image: ghcr.io/OWNER/REPO:latest
           ports:
             - containerPort: 3000
@@ -48,11 +73,8 @@ spec:
             - secretRef:
                 name: app-env
           env:
-            # Mantén el heap V8 por debajo del límite del cgroup para que Node
-            # haga GC antes de que el kernel mande SIGKILL (OOMKilled/exit 137).
             - name: NODE_OPTIONS
               value: "--max-old-space-size=640"
-          # Liveness: is the process alive? (cheap, no DB) — restart if not.
           livenessProbe:
             httpGet:
               path: /api/readyz
@@ -61,8 +83,6 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 6
-          # Readiness: can it serve? (DB ping) — gates traffic + the roll.
-          # 2 consecutive 200s ~= the Hermes "HealthyThreshold 2" behavior.
           readinessProbe:
             httpGet:
               path: /api/readyz
@@ -74,11 +94,89 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
-              memory: "384Mi"
+              cpu: "250m"
+              memory: "512Mi"
             limits:
               memory: "768Mi"
-          # Give in-flight requests a moment before SIGTERM during drain.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: mapa
+  labels:
+    app: mapa
+    tier: api
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: mapa
+      tier: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: mapa
+        tier: api
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: mapa
+                    tier: api
+                topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/REPO:latest
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: app-env
+          env:
+            # La API no hace render React, así que necesita menos heap que web.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"
+          livenessProbe:
+            httpGet:
+              path: /api/readyz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/readyz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "384Mi"
+            limits:
+              memory: "640Mi"
           lifecycle:
             preStop:
               exec:

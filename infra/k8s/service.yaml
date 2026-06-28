@@ -1,24 +1,21 @@
-# Namespace + Service (LoadBalancer) — TEMPLATE.
+# Namespace + DOS Services (LoadBalancer) — TEMPLATE.
 #
-# The Service of type LoadBalancer makes the Hetzner cloud-controller-manager
-# auto-provision a real Hetzner Load Balancer pointing at the app pods over the
-# private network.
+# Cada Service de tipo LoadBalancer hace que el cloud-controller-manager de
+# Hetzner aprovisione un LB real apuntando a los pods por la red privada:
+#   - web -> selector tier=web -> LB "mapa-lb"     -> terremoto… (dominio público)
+#   - api -> selector tier=api -> LB "mapa-api-lb"  -> api.terremoto… (terceros)
 #
-# This file is a TEMPLATE: two placeholders (the TLS annotations and the LB
-# ports, near the bottom) are filled by the deploy workflow via envsubst per
-# environment, so ONE manifest serves both. (Placeholder names are NOT written
-# here in $-form on purpose — envsubst would substitute them inside this comment.)
+# Dos LB = aislamiento total: una tormenta de tráfico de API pega solo al LB+pods
+# de api (su propio HPA, su propio blast radius), nunca al render del front.
 #
-#   target=staging  -> TLS at Cloudflare (proxied). LB speaks plain HTTP :80.
-#                      Cloudflare A-record proxied (orange), SSL mode "Full".
-#   target=prod     -> TLS at the LB. Hetzner managed Let's Encrypt cert on :443.
-#                      Vercel DNS: A-record at the LB + delegate the
-#                      _acme-challenge.<host> NS records to Hetzner DNS so the
-#                      managed cert can DNS-01-validate (the canonical external-
-#                      domain approach; auto-renews after the one-time delegation).
+# Placeholders rellenados por el workflow (envsubst) por entorno y por tier:
+#   ${WEB_TLS_ANNOTATIONS} ${API_TLS_ANNOTATIONS}  (los puertos son estáticos)
+# (no se escriben en $-form en los comentarios para que envsubst no los toque).
 #
-# The env-specific values live in the workflow's "Render Service for target"
-# step. See .github/workflows/deploy-hetzner.yml.
+#   target=staging -> TLS en Cloudflare (proxied). LB habla HTTP plano :80.
+#   target=prod    -> TLS en el LB. Cert managed Let's Encrypt en :443 por host.
+#
+# Ver el paso "Apply manifests" en .github/workflows/deploy-hetzner.yml.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -27,29 +24,60 @@ metadata:
 apiVersion: v1
 kind: Service
 metadata:
-  name: app
+  name: web
   namespace: mapa
   annotations:
-    # Provision the LB in the same location as the nodes.
     load-balancer.hetzner.cloud/location: "hel1"
-    # Route to pods over the private network (no public pod IPs).
     load-balancer.hetzner.cloud/use-private-ip: "true"
     load-balancer.hetzner.cloud/name: "mapa-lb"
-    # Active health check. Do NOT set health-check-port: the CCM health-checks
-    # the Service's NodePort on each node (3000 is the pod-internal port, NOT
-    # open on the host — setting it makes every check fail -> LB 503s). Omitting
-    # the port lets the CCM use the right NodePort automatically.
+    # NO fijar health-check-port (ver nota histórica: el CCM usa el NodePort).
     load-balancer.hetzner.cloud/health-check-protocol: "http"
     load-balancer.hetzner.cloud/health-check-http-path: "/api/readyz"
     load-balancer.hetzner.cloud/health-check-interval: "15s"
     load-balancer.hetzner.cloud/health-check-retries: "2"
     load-balancer.hetzner.cloud/uses-proxyprotocol: "false"
-    # --- TLS profile (injected per target by the workflow; lines carry their
-    #     own 4-space indentation, so the placeholder sits at column 0) ---
-${TLS_ANNOTATIONS}
+${WEB_TLS_ANNOTATIONS}
 spec:
   type: LoadBalancer
   selector:
     app: mapa
+    tier: web
   ports:
-${LB_PORTS}
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 3000
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: mapa
+  annotations:
+    load-balancer.hetzner.cloud/location: "hel1"
+    load-balancer.hetzner.cloud/use-private-ip: "true"
+    load-balancer.hetzner.cloud/name: "mapa-api-lb"
+    load-balancer.hetzner.cloud/health-check-protocol: "http"
+    load-balancer.hetzner.cloud/health-check-http-path: "/api/readyz"
+    load-balancer.hetzner.cloud/health-check-interval: "15s"
+    load-balancer.hetzner.cloud/health-check-retries: "2"
+    load-balancer.hetzner.cloud/uses-proxyprotocol: "false"
+${API_TLS_ANNOTATIONS}
+spec:
+  type: LoadBalancer
+  selector:
+    app: mapa
+    tier: api
+  ports:
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 3000
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 3000

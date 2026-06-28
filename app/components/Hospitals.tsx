@@ -67,7 +67,9 @@ export default function Hospitals() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/hospitals?include=states", {
+      // limit explícito: la página pública muestra TODOS los hospitales. El
+      // default del endpoint bajó a 50 (audit R-2), así que lo pedimos explícito.
+      const res = await fetch("/api/hospitals?include=states&limit=1000", {
         cache: "no-cache",
       });
       if (!res.ok) throw new Error("No se pudo cargar la lista de hospitales.");

@@ -132,6 +132,25 @@ Manten el PR revisable:
 - UI accesible en movil y escritorio.
 - Variables de entorno nuevas documentadas en `.env.example`.
 
+## Crear endpoints de API (OBLIGATORIO)
+
+Todo route en `app/api/**` debe seguir el patrón del repo. `npm run endpoints:check`
+corre en cada build y en CI; **rompe el build** si no se cumple. Reglas duras:
+
+- Handler **`async`** (`export async function GET|POST|...`), nunca síncrono.
+- **Sin `maxDuration` ni I/O largo de terceros inline**: ese trabajo se ENCOLA en
+  BullMQ y el handler responde `202 {jobId}` (status-poll en `/api/sync/status`).
+- **Sin llamadas síncronas bloqueantes** (`readFileSync`, `execSync`, …).
+- Bloque **`@swagger`** sobre el primer handler (la doc se autogenera).
+
+Recomendado (avisos, excepción con `// endpoint-check: ok`): lecturas en paralelo
+(`Promise.all`), GET público con `cached()` + `jsonWithEtag()`, mutaciones con
+auth o `checkRateLimit`, IP siempre hasheada (`hashIp`), nunca serializar el
+objeto completo a respuestas públicas.
+
+Detalle completo y ejemplos: `AGENTS.md` ("Crear un endpoint") y
+`docs/guides/documentar-endpoints-openapi.md`.
+
 ## Estilo de documentación
 
 - Escribe en español.

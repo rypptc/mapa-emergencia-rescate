@@ -127,12 +127,17 @@ jobs:
       # ---------------------------------------------------------------
       # 1. Build the immutable app + worker images, push to GHCR (:<sha> + :latest)
       # ---------------------------------------------------------------
+      # Push a GHCR con un PAT clásico (write:packages) en vez del GITHUB_TOKEN
+      # del run: tras mover el repo a la org `terremotovenezuela`, el GITHUB_TOKEN
+      # no tiene permiso de escritura sobre el package de la org ("installation not
+      # allowed to Write organization package"). El PAT del owner sí. Username =
+      # dueño del token (GHCR_PULL_USER); password = TOKEN_GITHUB_PACKAGES.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.GHCR_PULL_USER }}
+          password: ${{ secrets.TOKEN_GITHUB_PACKAGES }}
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -241,6 +246,51 @@ jobs:
             --from-literal=R2_PUBLIC_BASE="$R2_PUBLIC_BASE" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      # cluster-autoscaler-hcloud: token de Hetzner + HCLOUD_CLUSTER_CONFIG (JSON
+      # base64 con el cloud-init que une nodos nuevos a k3s — el MISMO join que
+      # usan los workers, ver infra/tofu/cloud-init/k3s-agent.yaml.tftpl). El CA
+      # lo lee para arrancar VPS efímeros. NO se commitea ningún secreto.
+      - name: Ensure cluster-autoscaler secret
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          K3S_TOKEN: ${{ secrets.K3S_TOKEN }}
+          MASTER_PRIVATE_IP: "10.0.1.5"
+        run: |
+          set -euo pipefail
+          if [ -z "${HCLOUD_TOKEN:-}" ] || [ -z "${K3S_TOKEN:-}" ]; then
+            echo "HCLOUD_TOKEN/K3S_TOKEN unset — skipping cluster-autoscaler secret."
+            exit 0
+          fi
+          kubectl create namespace mapa --dry-run=client -o yaml | kubectl apply -f -
+          # cloud-init para nodos nuevos: idéntico al k3s-agent de tofu (join por
+          # IP privada del master + token + cloud-provider=external para el CCM).
+          CLOUD_INIT=$(cat <<EOF
+          #cloud-config
+          write_files:
+            - path: /etc/rancher/k3s/config.yaml
+              content: |
+                server: "https://${MASTER_PRIVATE_IP}:6443"
+                token: "${K3S_TOKEN}"
+                flannel-iface: "enp7s0"
+                kubelet-arg:
+                  - "cloud-provider=external"
+          runcmd:
+            - curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=stable K3S_URL="https://${MASTER_PRIVATE_IP}:6443" K3S_TOKEN="${K3S_TOKEN}" sh -s - agent
+          EOF
+          )
+          CLOUD_INIT_B64=$(printf '%s' "$CLOUD_INIT" | base64 -w0)
+          # HCLOUD_CLUSTER_CONFIG: JSON con la imagen y el cloud-init por pool.
+          # El nombre de pool (mapa-pool) DEBE coincidir con --nodes=...:mapa-pool.
+          CLUSTER_CONFIG=$(cat <<EOF
+          {"imagesForArch":{"amd64":"debian-12","arm64":""},"nodeConfigs":{"mapa-pool":{"cloudInit":"${CLOUD_INIT_B64}","labels":{"role":"k3s-worker-autoscaled"}}}}
+          EOF
+          )
+          CLUSTER_CONFIG_B64=$(printf '%s' "$CLUSTER_CONFIG" | base64 -w0)
+          kubectl -n kube-system create secret generic cluster-autoscaler-hcloud \
+            --from-literal=token="$HCLOUD_TOKEN" \
+            --from-literal=cluster-config="$CLUSTER_CONFIG_B64" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       # Server-side runtime secrets (NO NEXT_PUBLIC_*): el secreto del proxy
       # OpenPanel (route.ts) y la contraseña del panel admin (lib/admin.ts).
       # app-env tiene TODAS las vars de runtime (DATABASE_URL, VALKEY_URL, R2_*,
@@ -313,22 +363,36 @@ jobs:
           PROD_HOST: ${{ secrets.PROD_HOST }}
         run: |
           set -euo pipefail
-          # ONE service.yaml serves both envs; envsubst fills the TLS profile.
-          HTTP_PORT=$(printf '    - name: http\n      protocol: TCP\n      port: 80\n      targetPort: 3000')
+          # service.yaml define DOS Services (web + api) con puertos estáticos;
+          # envsubst solo rellena el perfil TLS. La API usa EL MISMO perfil que
+          # web (mismo patrón que el LB actual `app`): TLS lo termina Cloudflare
+          # (proxied) y el LB lleva el Origin cert cf-origin-dreamit; el hostname
+          # api.terremoto… se enruta en CLOUDFLARE (DNS A → mapa-api-lb, proxied),
+          # NO con un cert managed de Hetzner. Por eso no hace falta API_HOST.
           if [ "$TARGET" = "prod" ]; then
             : "${PROD_HOST:?prod target needs the PROD_HOST secret (the public hostname)}"
-            export TLS_ANNOTATIONS=$(printf '    load-balancer.hetzner.cloud/protocol: "https"\n    load-balancer.hetzner.cloud/certificate-type: "managed"\n    load-balancer.hetzner.cloud/http-managed-certificate-domains: "%s"\n    load-balancer.hetzner.cloud/http-redirect-https: "true"' "$PROD_HOST")
-            export LB_PORTS=$(printf '    - name: https\n      protocol: TCP\n      port: 443\n      targetPort: 3000\n%s' "$HTTP_PORT")
+            export WEB_TLS_ANNOTATIONS=$(printf '    load-balancer.hetzner.cloud/protocol: "https"\n    load-balancer.hetzner.cloud/certificate-type: "managed"\n    load-balancer.hetzner.cloud/http-managed-certificate-domains: "%s"\n    load-balancer.hetzner.cloud/http-redirect-https: "true"' "$PROD_HOST")
           else
-            export TLS_ANNOTATIONS=$(printf '    load-balancer.hetzner.cloud/protocol: "https"\n    load-balancer.hetzner.cloud/http-certificates: "cf-origin-dreamit"\n    load-balancer.hetzner.cloud/http-redirect-https: "true"')
-            export LB_PORTS=$(printf '    - name: https\n      protocol: TCP\n      port: 443\n      targetPort: 3000\n%s' "$HTTP_PORT")
+            export WEB_TLS_ANNOTATIONS=$(printf '    load-balancer.hetzner.cloud/protocol: "https"\n    load-balancer.hetzner.cloud/http-certificates: "cf-origin-dreamit"\n    load-balancer.hetzner.cloud/http-redirect-https: "true"')
           fi
-          envsubst '${TLS_ANNOTATIONS} ${LB_PORTS}' < infra/k8s/service.yaml > /tmp/service.rendered.yaml
-          echo "--- rendered Service (target=$TARGET) ---"
+          # api SIEMPRE replica el perfil de web (sea managed o cf-origin).
+          export API_TLS_ANNOTATIONS="$WEB_TLS_ANNOTATIONS"
+          envsubst '${WEB_TLS_ANNOTATIONS} ${API_TLS_ANNOTATIONS}' \
+            < infra/k8s/service.yaml > /tmp/service.rendered.yaml
+          echo "--- rendered Services (target=$TARGET) ---"
           cat /tmp/service.rendered.yaml
 
           kubectl apply -f /tmp/service.rendered.yaml
+          # web + api Deployments (mismo image, parcheado en el paso Roll).
           kubectl apply -f infra/k8s/deployment.yaml
+          # HPA por tier (web + api). metrics-server ya está en el clúster.
+          kubectl apply -f infra/k8s/hpa.yaml
+          # Cluster Autoscaler (nodos efímeros) — solo si su secret existe.
+          if kubectl -n kube-system get secret cluster-autoscaler-hcloud >/dev/null 2>&1; then
+            kubectl apply -f infra/k8s/cluster-autoscaler.yaml
+          else
+            echo "cluster-autoscaler-hcloud secret missing — skipping CA."
+          fi
           # Migration worker Deployment (only if migrate-env exists).
           if kubectl -n mapa get secret migrate-env >/dev/null 2>&1; then
             sed "s#ghcr.io/OWNER/REPO-worker:latest#${{ env.IMAGE }}-worker:${{ env.SHA }}#" \
@@ -358,9 +422,17 @@ jobs:
       - name: Roll to the new image (zero-downtime)
         run: |
           set -euo pipefail
-          kubectl -n mapa set image deployment/app \
-            app=${{ env.IMAGE }}:${{ env.SHA }}
-          kubectl -n mapa rollout status deployment/app --timeout=300s
+          # web + api son el MISMO image; parcheamos ambos. maxUnavailable:0 +
+          # readiness /api/readyz garantizan que el LB drene los viejos y solo
+          # enrute a los nuevos Ready (cero downtime). rollout status falla el
+          # deploy si un tier no converge.
+          for tier in web api; do
+            kubectl -n mapa set image "deployment/${tier}" \
+              app=${{ env.IMAGE }}:${{ env.SHA }}
+          done
+          for tier in web api; do
+            kubectl -n mapa rollout status "deployment/${tier}" --timeout=300s
+          done
           if kubectl -n mapa get deploy migrate-worker >/dev/null 2>&1; then
             kubectl -n mapa set image deployment/migrate-worker \
               worker=${{ env.IMAGE }}-worker:${{ env.SHA }}

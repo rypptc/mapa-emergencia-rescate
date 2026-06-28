@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { getDb, hasDbEnv, schema } from "./drizzle";
 import { isR2Configured, uploadPhotoDataUrl } from "./r2";
+import { isAllowedImageDataUrl, parseImageDataUri } from "./image";
 import type { ExternalPerson } from "./sync/types";
 
 const { missingPersons } = schema;
@@ -91,9 +92,21 @@ export const MIN_SEARCH_LEN = 3;
 /**
  * Tope del conteo de resultados de búsqueda. Contar las coincidencias exactas
  * cuesta ~50 ms por request; acotamos a este número (se muestra "500+") para que
- * el conteo pare temprano. El listado sin búsqueda sí usa el conteo exacto.
+ * el conteo pare temprano.
  */
 export const SEARCH_COUNT_CAP = 500;
+
+/**
+ * Cap del conteo SIN búsqueda (listado por status). Un count(*) exacto totalmente
+ * sin límite tarda segundos por request (audit R-1); acotamos a este número (la
+ * UI muestra "N+" si se trunca). Lo ponemos por ENCIMA del dataset real (~67k
+ * activas, ~11k encontradas) para que la paginación de FoundPersons/listados siga
+ * alcanzando todas las filas reales; solo acota el peor caso patológico (>100k).
+ * El conteo va en paralelo con la página (Promise.all) y el LIMIT corta el scan.
+ * NOTA: los TITULARES exactos del home usan /api/missing/stats (countMissingStats),
+ * que no está acotado — este cap solo afecta el `total` de la lista paginada.
+ */
+export const LIST_COUNT_CAP = 100_000;
 
 /**
  * Indica si la búsqueda acento-insensitiva (unaccent + pg_trgm) está disponible.
@@ -179,9 +192,9 @@ function normalizeAge(age: NewMissingPerson["age"]): number | null {
   return n;
 }
 
-/** Valida que la cadena sea un data URL de imagen soportada. */
+/** Valida que la cadena sea un data URL de imagen soportada (ver lib/image.ts). */
 export function isValidPhotoDataUrl(photo: string): boolean {
-  return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo);
+  return isAllowedImageDataUrl(photo);
 }
 
 /**
@@ -328,29 +341,37 @@ export async function listMissingPage(
         ? sql`COALESCE(resolved_at, created_at) DESC, id DESC`
         : sql`created_at DESC, id DESC`;
 
-    // Con búsqueda acotamos el conteo (para temprano en SEARCH_COUNT_CAP); sin
-    // búsqueda usamos el conteo exacto (es el número que se muestra de titular).
+    // Acotamos SIEMPRE el conteo a COUNT_CAP (con o sin búsqueda): un count(*)
+    // exacto sobre decenas de miles de filas (67k+ active) cuesta segundos por
+    // request (audit R-1). Mostramos "N+" cuando se trunca. El cap de búsqueda
+    // sigue siendo el más estricto (resultados relevantes son pocos).
     const hasSearch = terms.length > 0;
-    const countQuery = hasSearch
-      ? sql`SELECT count(*)::int AS n FROM (SELECT 1 FROM missing_persons ${whereSql} LIMIT ${SEARCH_COUNT_CAP}) t`
-      : sql`SELECT count(*)::int AS n FROM missing_persons ${whereSql}`;
-    const countRes = await db.execute(countQuery);
+    const cap = hasSearch ? SEARCH_COUNT_CAP : LIST_COUNT_CAP;
+    const countQuery = sql`SELECT count(*)::int AS n FROM (SELECT 1 FROM missing_persons ${whereSql} LIMIT ${cap}) t`;
+
+    // Conteo y página son independientes → en paralelo (audit M-3/§3): la
+    // latencia es el MAX de ambos round-trips, no la suma. Como el conteo está
+    // acotado y la página usa offset+limit, ambos son baratos. Calculamos el
+    // offset con `requestedPage` directo (sin esperar al total); si la página
+    // pedida excede el total, devolvemos vacío — aceptable y evita el waterfall.
+    const offset = (requestedPage - 1) * pageSize;
+    const [countRes, listRes] = await Promise.all([
+      db.execute(countQuery),
+      db.execute(
+        sql`SELECT id, name, age, description, last_seen, contact,
+                   (photo IS NOT NULL) AS has_photo,
+                   photo_external_url,
+                   status,
+                   resolution_note,
+                   (resolution_photo IS NOT NULL) AS has_resolution_photo,
+                   resolved_at, created_at
+            FROM missing_persons ${whereSql} ORDER BY ${orderSql} LIMIT ${pageSize} OFFSET ${offset}`,
+      ),
+    ]);
     const total = execRows<{ n: number }>(countRes)[0]?.n ?? 0;
-    const totalCapped = hasSearch && total >= SEARCH_COUNT_CAP;
+    const totalCapped = total >= cap;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(requestedPage, totalPages);
-    const offset = (page - 1) * pageSize;
-
-    const listRes = await db.execute(
-      sql`SELECT id, name, age, description, last_seen, contact,
-                 (photo IS NOT NULL) AS has_photo,
-                 photo_external_url,
-                 status,
-                 resolution_note,
-                 (resolution_photo IS NOT NULL) AS has_resolution_photo,
-                 resolved_at, created_at
-          FROM missing_persons ${whereSql} ORDER BY ${orderSql} LIMIT ${pageSize} OFFSET ${offset}`,
-    );
     const rows = execRows<Row>(listRes);
 
     return { people: rows.map(rowToPerson), total, page, pageSize, totalPages, totalCapped };
@@ -571,9 +592,11 @@ export interface RemotePhoto {
 
 function dataUrlToPhoto(dataUrl: string | null): PhotoData | null {
   if (!dataUrl) return null;
-  const match = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(dataUrl);
-  if (!match) return null;
-  return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
+  // Usa el parser central: rechaza subtipos no permitidos (svg/gif), antes se
+  // aceptaba cualquier image/* y se servía inline (vector XSS, audit M-6).
+  const parsed = parseImageDataUri(dataUrl);
+  if (!parsed) return null;
+  return { contentType: parsed.contentType, buffer: parsed.bytes };
 }
 
 /**

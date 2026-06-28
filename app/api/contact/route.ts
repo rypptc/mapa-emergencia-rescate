@@ -3,7 +3,7 @@ import {
   createContactMessage,
   validateContactInput,
 } from "@/lib/contact-inbox";
-import { checkRateLimit, clientIp } from "@/lib/ratelimit";
+import { checkRateLimit, clientIp, hashIp } from "@/lib/ratelimit";
 import { readJson, bodyErrorResponse, BODY_LIMIT_TEXT } from "@/lib/body";
 
 export const dynamic = "force-dynamic";
@@ -83,7 +83,7 @@ export async function POST(request: Request) {
   try {
     const message = await createContactMessage({
       ...parsed,
-      ipHash: ip,
+      ipHash: hashIp(request),
     });
     return NextResponse.json({
       ok: true,
