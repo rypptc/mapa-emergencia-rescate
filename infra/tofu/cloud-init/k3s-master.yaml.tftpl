@@ -39,6 +39,17 @@ write_files:
         - traefik
         - servicelb
       disable-cloud-controller: true
+      # Dedica el control-plane: repele pods de app (web/api/worker) al pool de
+      # workers. k3s deja el master schedulable por defecto; sin esto, con 3
+      # réplicas + anti-afinidad SOFT, una aterriza en el master y compite con
+      # k3s-server/etcd por la RAM del nodo (cx-line, 3.7Gi). NoSchedule (no
+      # NoExecute) = no evicta lo ya corriendo, solo bloquea lo nuevo. Los pods
+      # de sistema de k3s (coredns, metrics-server, CCM) YA toleran este taint;
+      # el cluster-autoscaler también lo tolera (k8s/cluster-autoscaler.yaml) y
+      # sigue fijado aquí por nodeSelector. Reactivar el master como worker =
+      # quitar esta línea + re-provisionar (o kubectl taint ... -).
+      node-taint:
+        - "node-role.kubernetes.io/control-plane:NoSchedule"
       kubelet-arg:
         - "cloud-provider=external"
 
