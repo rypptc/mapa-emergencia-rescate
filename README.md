@@ -14,6 +14,13 @@ y **Neon Postgres**. Pensada para alto tráfico y para funcionar bien en móvil.
 - Botón "Atendido" para limpiar reportes ya resueltos.
 - Refresco automático cada 5 s (polling), pausado cuando la pestaña no está visible.
 
+## Diseño
+
+El sistema visual vive en [`design/DESIGN.md`](design/DESIGN.md). Sigue el
+formato DESIGN.md de Google para combinar tokens de diseño con criterios
+humanos de uso, y debe revisarse antes de cambios visuales en la interfaz
+pública.
+
 ## Optimizaciones para alto flujo de uso
 
 - **Caché de CDN** en `GET /api/reports` (`s-maxage=4, stale-while-revalidate=30`):
