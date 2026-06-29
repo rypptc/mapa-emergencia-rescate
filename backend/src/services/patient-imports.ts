@@ -27,6 +27,7 @@ import {
   resolveHospitalAlias,
   validateRow,
   type DedupCandidate,
+  type NormalizedRow,
   type RawPatientRow,
 } from "@/services/patient-import-logic";
 
@@ -479,33 +480,78 @@ interface RawStagingRow {
   rawData: unknown;
 }
 
-/** Resuelve un hospital por id explícito o por nombre exacto (case-insensitive). */
-async function resolveHospitalId(
-  hint: string | null,
-  sourceHospital: string,
-): Promise<string | null> {
+interface NameMatch {
+  id: string;
+  count: number;
+}
+
+/**
+ * C6 (#151) — Resuelve el hospital de TODAS las filas del lote en a lo sumo DOS
+ * queries (una por id explícito, una por nombre), evitando el N+1 que producía
+ * resolver fila por fila en lotes grandes. Devuelve un arreglo alineado a `norms`
+ * (mismo índice => mismo hospital resuelto o `null`).
+ *
+ * Preserva exactamente la semántica por fila anterior:
+ *   - id explícito que existe en `hospitals` gana (no se consulta el nombre);
+ *   - si no, nombre exacto case-insensitive (con alias curado previo);
+ *   - regla de ambigüedad intacta: una clave de nombre que matchea 0 o ≥2
+ *     hospitales queda SIN resolver (el operador desambigua con el id explícito,
+ *     evita asignar al hospital equivocado).
+ */
+async function resolveHospitalIdsForBatch(
+  norms: NormalizedRow[],
+): Promise<(string | null)[]> {
   const db = getDb();
-  if (hint) {
-    const byId = await db
+
+  // 1) Ids explícitos: una sola query inArray para todos los hints distintos.
+  const hintSet = new Set<string>();
+  for (const n of norms) if (n.hospitalIdHint) hintSet.add(n.hospitalIdHint);
+  const existingIds = new Set<string>();
+  if (hintSet.size > 0) {
+    const found = await db
       .select({ id: hospitals.id })
       .from(hospitals)
-      .where(eq(hospitals.id, hint))
-      .limit(1);
-    if (byId[0]) return byId[0].id;
+      .where(inArray(hospitals.id, [...hintSet]));
+    for (const r of found) existingIds.add(r.id);
   }
-  const txt = sourceHospital.trim();
-  if (!txt) return null;
-  // Alias curado primero (mapa explícito y mínimo): si el texto coincide con un
-  // alias conocido, resolvemos contra su nombre canónico. Vacío hoy = no-op.
-  const canonical = resolveHospitalAlias(txt) ?? txt;
-  // Nombre exacto case-insensitive. Si hay ambigüedad (≥2) NO resolvemos: que el
-  // operador desambigüe con el id explícito (evita asignar al hospital equivocado).
-  const byName = await db
-    .select({ id: hospitals.id })
-    .from(hospitals)
-    .where(sql`lower(${hospitals.name}) = lower(${canonical})`)
-    .limit(2);
-  return byName.length === 1 ? (byName[0]?.id ?? null) : null;
+
+  // Clave canónica de nombre por fila (null si el id explícito ya resolvió o si no
+  // hay texto de hospital). El alias curado se aplica antes de comparar.
+  const canonicalByRow: (string | null)[] = norms.map((n) => {
+    if (n.hospitalIdHint && existingIds.has(n.hospitalIdHint)) return null;
+    const txt = n.sourceHospital.trim();
+    if (!txt) return null;
+    return resolveHospitalAlias(txt) ?? txt;
+  });
+
+  // 2) Nombres exactos case-insensitive: una sola query para todas las claves
+  //    distintas. Se cuenta cuántos hospitales matchean cada clave para aplicar la
+  //    regla de ambigüedad (count === 1 resuelve; 0 o ≥2 quedan sin resolver).
+  const lowerKeys = new Set<string>();
+  for (const c of canonicalByRow) if (c) lowerKeys.add(c.toLowerCase());
+  const nameMatch = new Map<string, NameMatch>();
+  if (lowerKeys.size > 0) {
+    const matches = (await db
+      .select({ id: hospitals.id, lname: sql<string>`lower(${hospitals.name})` })
+      .from(hospitals)
+      .where(inArray(sql`lower(${hospitals.name})`, [...lowerKeys]))) as {
+      id: string;
+      lname: string;
+    }[];
+    for (const m of matches) {
+      const prev = nameMatch.get(m.lname);
+      if (prev) prev.count++;
+      else nameMatch.set(m.lname, { id: m.id, count: 1 });
+    }
+  }
+
+  return norms.map((n, i) => {
+    if (n.hospitalIdHint && existingIds.has(n.hospitalIdHint)) return n.hospitalIdHint;
+    const canonical = canonicalByRow[i];
+    if (!canonical) return null;
+    const match = nameMatch.get(canonical.toLowerCase());
+    return match && match.count === 1 ? match.id : null;
+  });
 }
 
 /** Carga (cacheado) los candidatos de dedup de un hospital desde DB. */
@@ -640,13 +686,21 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
   let review = 0;
   const now = Date.now();
 
-  for (const raw of rawRows) {
+  // C6: pre-normaliza TODO el lote una vez y deriva el HMAC del documento ANTES de
+  // tocar dedup/persistencia (queda en staging y se copia al paciente final, así la
+  // purga del crudo en C5 no pierde la dedup exacta por documento). Con el lote ya
+  // normalizado, resuelve los hospitales en batch (2 queries) en vez de N+1 por fila.
+  const norms = rawRows.map((raw) => {
     const norm = normalizeRow((raw.rawData ?? {}) as RawPatientRow);
-    // Deriva el HMAC del documento ANTES de tocar dedup/persistencia: queda
-    // guardado en staging y se persiste en el paciente final, así la purga del
-    // crudo (C5) no pierde la capacidad de dedup exacta por documento.
     norm.documentHash = documentHashFor(norm.documentDigits);
-    const hospitalId = await resolveHospitalId(norm.hospitalIdHint, norm.sourceHospital);
+    return norm;
+  });
+  const hospitalIds = await resolveHospitalIdsForBatch(norms);
+
+  for (let i = 0; i < rawRows.length; i++) {
+    const raw = rawRows[i]!;
+    const norm = norms[i]!;
+    const hospitalId = hospitalIds[i] ?? null;
     const { errors, hospitalUnresolved } = validateRow(norm, hospitalId !== null);
     const warnings = [...norm.warnings];
 
