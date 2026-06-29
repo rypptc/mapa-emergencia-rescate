@@ -17,7 +17,7 @@
  * documento/cédula, las notas, el contacto ni los hashes — solo estado,
  * contadores y errores/avisos de revisión.
  */
-import { Router } from "express";
+import { Router, json } from "express";
 import { z } from "zod";
 import { asyncHandler, rateLimit, validate } from "@/middleware";
 import { requireCapability } from "@/middleware/auth";
@@ -27,6 +27,13 @@ import { enqueuePatientImport } from "@/lib/queues";
 import * as service from "@/services/patient-imports";
 
 export const patientImportsRouter = Router();
+
+// D2: el parser global del server es de 256kb; un lote de hasta 2000 filas no
+// cabe ahí. El POST de creación está en LARGE_BODY_POST_PATHS (server.ts) para
+// saltar el parser global, y monta este parser ampliado. 4mb cubre el caso
+// esperado de 2000 filas con holgura (rowSchema es passthrough, así que extras
+// arbitrarios podrían inflar más). Endpoint autenticado (no anónimo).
+const jsonLargeBatch = json({ limit: "4mb" });
 
 // Fila de entrada (fase 1: JSON estructurado). Cotas sanas; los campos abiertos
 // extra se conservan en el crudo. La identidad mínima (nombre + hospital
@@ -105,6 +112,7 @@ patientImportsRouter.post(
   "/",
   rateLimit({ scope: "public:patient-import:create", limit: 30 }),
   requireCapability("patient:import"),
+  jsonLargeBatch, // parser 4mb (tras los gates: no parseamos 4mb para callers rechazados)
   validate({ body: createSchema }),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof createSchema>;
