@@ -485,7 +485,6 @@ interface ApplyableRow {
   condition: string | null;
   status: string | null;
   hospitalId: string | null;
-  notes: unknown;
 }
 
 /**
@@ -514,8 +513,6 @@ export async function applyImport(
       condition: patientImportRows.condition,
       status: patientImportRows.status,
       hospitalId: patientImportRows.hospitalId,
-      // Notas del input (no el documento, que se queda en raw_data restringido).
-      notes: sql<unknown>`${patientImportRows.rawData} ->> 'notes'`,
     })
     .from(patientImportRows)
     .where(
@@ -537,7 +534,17 @@ export async function applyImport(
       // revalida igual (PATIENT_CONDITIONS/STATUSES.has) antes de escribir.
       condition: (row.condition ?? undefined) as PatientCondition | undefined,
       status: (row.status ?? undefined) as PatientStatus | undefined,
-      notes: typeof row.notes === "string" ? row.notes : "",
+      // A0 (privacidad) — MITIGACIÓN TEMPORAL, ver #117.
+      // El campo `notes` se expone hoy en la búsqueda pública de pacientes
+      // (publicSafe solo restringe el WHERE, no el DTO), así que una cédula o
+      // nota médica del input quedaría pública. Por eso la importación NO propaga
+      // notas crudas al paciente final. El crudo sigue confinado en `raw_data`
+      // (staging restringido).
+      // El fix de raíz es #117 (que el DTO público de pacientes no devuelva
+      // `notes` + guardrail), igual que `public_hospitalized_patients` en #71 de
+      // venezuela-ayuda. Cuando #117 aterrice, decidir si los pacientes
+      // importados conservan notas en un campo restringido en vez de vaciarlas.
+      notes: "",
     });
     await db
       .update(patientImportRows)
