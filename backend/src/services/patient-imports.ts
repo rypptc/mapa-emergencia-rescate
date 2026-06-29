@@ -198,6 +198,24 @@ export async function setImportJob(id: string, jobId: string): Promise<void> {
     .where(eq(patientImports.id, id));
 }
 
+/**
+ * Tras encolar el `process` con éxito (D4): registra el jobId SIEMPRE y avanza el
+ * estado `pending → queued` de forma CONDICIONAL. El `case` evita una carrera: si
+ * el worker ya arrancó y dejó el lote en `processing`/`processed`, este UPDATE no
+ * lo pisa (solo promueve desde `pending`). Así el estado nunca retrocede.
+ */
+export async function markImportQueued(id: string, jobId: string): Promise<void> {
+  const db = getDb();
+  await db
+    .update(patientImports)
+    .set({
+      jobId,
+      status: sql`case when ${patientImports.status} = 'pending' then 'queued' else ${patientImports.status} end`,
+      updatedAt: Date.now(),
+    })
+    .where(eq(patientImports.id, id));
+}
+
 interface StagingRow {
   id: string;
   rowIndex: number;

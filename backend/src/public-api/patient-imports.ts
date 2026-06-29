@@ -121,16 +121,20 @@ patientImportsRouter.post(
     try {
       jobId = await enqueuePatientImport({ importId: summary.id, mode: "process" });
     } catch {
+      // D4: no dejar el lote huérfano en `pending` sin job. Lo sellamos `failed`
+      // para que la API lo refleje y no quede colgado para siempre.
+      await service.markImportFailed(summary.id, "No se pudo encolar el procesamiento.");
       throw serviceUnavailable("No se pudo encolar la importación. Inténtalo de nuevo.");
     }
-    await service.setImportJob(summary.id, jobId);
+    // D4: marca queued (condicional: no pisa al worker si ya arrancó) + jobId.
+    await service.markImportQueued(summary.id, jobId);
     await writeAudit(req, {
       action: "patient-import.create",
       targetType: "patient-import",
       targetId: summary.id,
       metadata: { rows: summary.counts.total, source: summary.source },
     });
-    res.status(202).json({ import: { ...summary, jobId }, jobId });
+    res.status(202).json({ import: { ...summary, status: "queued", jobId }, jobId });
   }),
 );
 
