@@ -62,7 +62,18 @@ const createSchema = z.object({
   // audit_log). El modelado rico de procedencia (canal + referencia por-fila)
   // está propuesto en docs/rfcs/0006-procedencia-ingesta-pacientes.md (#151).
   source: z.string().trim().max(120).optional(),
-  contentType: z.string().trim().max(120).optional(),
+  // C7: fase 1 SOLO procesa JSON estructurado. Si el cliente declara otro
+  // contentType (p.ej. "text/csv"), lo rechazamos con 400 en vez de procesar el
+  // payload como JSON silenciosamente. Cuando entren CSV/XLSX (Fase 4) se amplía
+  // el set permitido.
+  contentType: z
+    .string()
+    .trim()
+    .max(120)
+    .optional()
+    .refine((v) => v === undefined || v === "application/json", {
+      message: 'Solo se admite contentType "application/json" en esta fase.',
+    }),
   rows: z.array(rowSchema).min(1, "Envía al menos una fila.").max(2000, "Máximo 2000 filas por lote."),
 });
 
@@ -97,7 +108,11 @@ const rowsQuery = z.object({
  *                   Etiqueta DECLARADA del origen del lote (no confiable, no es
  *                   autoría). La autoría verificada es el usuario autenticado
  *                   (created_by). Default "api".
- *               contentType: { type: string }
+ *               contentType:
+ *                 type: string
+ *                 description: >
+ *                   Solo "application/json" en esta fase (default). Otro valor
+ *                   responde 400. CSV/XLSX llegarán en una fase posterior.
  *               rows:
  *                 type: array
  *                 items: { type: object }
