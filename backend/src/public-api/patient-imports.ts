@@ -48,6 +48,12 @@ const rowSchema = z
   .passthrough();
 
 const createSchema = z.object({
+  // `source` = etiqueta DECLARADA del origen del lote (p.ej. "telegram",
+  // "archivo-hospital-x"). La declara el cliente y NO es confiable: nunca
+  // representa autoría ni se usa para auth/dedup. La autoría VERIFICADA es el
+  // usuario autenticado (`created_by`, derivado de req.user en el route + en el
+  // audit_log). El modelado rico de procedencia (canal + referencia por-fila)
+  // está propuesto en docs/rfcs/0006-procedencia-ingesta-pacientes.md (#151).
   source: z.string().trim().max(120).optional(),
   contentType: z.string().trim().max(120).optional(),
   rows: z.array(rowSchema).min(1, "Envía al menos una fila.").max(2000, "Máximo 2000 filas por lote."),
@@ -78,7 +84,12 @@ const rowsQuery = z.object({
  *             type: object
  *             required: [rows]
  *             properties:
- *               source: { type: string }
+ *               source:
+ *                 type: string
+ *                 description: >
+ *                   Etiqueta DECLARADA del origen del lote (no confiable, no es
+ *                   autoría). La autoría verificada es el usuario autenticado
+ *                   (created_by). Default "api".
  *               contentType: { type: string }
  *               rows:
  *                 type: array
