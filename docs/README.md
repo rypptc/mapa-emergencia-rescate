@@ -87,6 +87,8 @@ acción.
   · _propuesta_.
 - [0005 — Panel admin standalone (3er tier)](rfcs/0005-panel-admin-standalone.md)
   · _implementado_.
+- [0006 — Hub de datos públicos: réplica saneada con SQL crudo y API](rfcs/0006-hub-replica-sql-publico.md)
+  · _propuesta_ · réplica lógica + TCP/TLS para consumidores externos.
 
 ### ADRs
 
@@ -113,6 +115,7 @@ acción.
 - [Dominio, DNS y TLS](deploy/dominio-y-dns.md)
 - [Migraciones de base de datos (Drizzle)](deploy/migraciones-de-base-de-datos.md)
 - [Estructura de la infraestructura](deploy/estructura-infra.md)
+- [Réplica pública (hub SQL) — runbook](deploy/replica-publica-hub.md)
 
 ### Infraestructura e integraciones
 

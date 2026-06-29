@@ -52,3 +52,24 @@ output "k3s_master_public_ip" {
 output "k3s_master_private_ip" {
   value = var.k3s_master_private_ip
 }
+
+# --- Hub Postgres (RFC 0006) ---
+output "hub_private_ip" {
+  value = var.hub_private_ip
+}
+output "hub_public_ip" {
+  description = "IP pública del hub (consumidores conectan aquí; apunta el DNS data.* aquí)."
+  value       = hcloud_server.hub_postgres.ipv4_address
+}
+# Cadena que usa el SUBSCRIPTION del hub para jalar del primario (red privada).
+output "hub_subscription_conn" {
+  description = "CONNECTION para CREATE SUBSCRIPTION en el hub (apunta al primario)."
+  sensitive   = true
+  value       = "host=${var.postgres_private_ip} port=5432 dbname=${var.postgres_app_db} user=${var.hub_repl_user} password=${var.hub_repl_password} sslmode=disable"
+}
+# Cadena admin del backend hacia el hub (crear roles de consumidor).
+output "hub_admin_url" {
+  description = "URL del rol CREATEROLE del backend en el hub (red privada)."
+  sensitive   = true
+  value       = "postgres://${var.hub_admin_user}:${var.hub_admin_password}@${var.hub_private_ip}:5432/${var.hub_db}"
+}

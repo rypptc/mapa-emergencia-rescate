@@ -59,6 +59,14 @@ function AuthedShell({ children }: { children: ReactNode }) {
             </ul>
           )}
 
+          {/* Réplica pública (SQL hub): SOLO super admin. mirror:manage NO está en
+              el comodín "*" del admin normal, así que un admin corriente no lo ve. */}
+          {can("mirror:manage") && (
+            <ul className="mt-1 flex flex-col gap-1">
+              <NavLink href="/hub-credentials" label="Réplica pública" pathname={pathname} />
+            </ul>
+          )}
+
           {/* Administración RBAC — cada enlace gateado por su capacidad. La
               gestión de usuarios (incluida la invitación) vive en /users. */}
           {(can("role:read") || can("user:read") || can("user:invite")) && (

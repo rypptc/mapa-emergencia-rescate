@@ -55,7 +55,17 @@ export const CROSS_CUTTING: { key: string; category: string; description: string
   // autenticado" — para encajar en el deny-by-default del repo y poder quitársela
   // a un rol restringido si hiciera falta (least-privilege).
   { key: "apikey:manage", category: "auth", description: "Crear y revocar tus propias API keys" },
+  // Acceso a la RÉPLICA PÚBLICA (hub SQL, RFC 0006): emitir/revocar credenciales
+  // de consumidor (rol Postgres + password + IP en el firewall). Es la capacidad
+  // MÁS sensible (abre un puerto público + crea credenciales de DB), así que NO
+  // se siembra en ningún rol por defecto y tiene un CORTE especial en resolve.ts:
+  // se exige incluso al admin semilla, que debe tener además el flag de super
+  // admin (users.is_super_admin). Ver MIRROR_MANAGE + userHasCapability.
+  { key: "mirror:manage", category: "auth", description: "Emitir/revocar acceso a la réplica pública (SQL hub)" },
 ];
+
+/** Capacidad que gobierna el acceso a la réplica pública. Gateada a super admin. */
+export const MIRROR_MANAGE = "mirror:manage";
 
 export interface CapabilityDef {
   key: string;

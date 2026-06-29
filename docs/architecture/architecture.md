@@ -121,6 +121,15 @@ también cubren `src/modules/**`.
   app no rota.
 - Las migraciones deben ser expand-contract: pods viejos siguen sirviendo durante
   el rollout mientras los nuevos arrancan contra el esquema actualizado.
+- **Réplica pública (hub SQL).** Un segundo Postgres (`mapa-hub-postgres`, tofu)
+  recibe por **replicación lógica** solo las tablas/columnas publicables (sin PII
+  directa de secretos/auditoría/federación; ver RFC 0006) y expone SQL crudo de
+  **solo lectura** por TCP 5432 con TLS. El acceso lo emite el backend: un **super
+  admin** (`mirror:manage`, gateada por `users.is_super_admin` con corte en
+  `auth/resolve.ts`) crea un rol Postgres por consumidor y abre su IP en el
+  firewall `mapa-hub-fw` vía la API de Hetzner. Si el hub cae, el primario no se
+  afecta (`max_slot_wal_keep_size` acota el WAL). Runbook:
+  `docs/deploy/replica-publica-hub.md`.
 
 ## Workers y colas
 

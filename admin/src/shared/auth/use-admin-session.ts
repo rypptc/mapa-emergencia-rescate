@@ -53,9 +53,14 @@ export function useAdminSession(): AdminSessionValue {
     qc.setQueryData(ME_KEY, null);
   }, [qc]);
 
+  // Capacidades FUERA del comodín "*": aunque un admin tenga "*", estas exigen
+  // estar presentes EXPLÍCITAMENTE (las concede el backend solo a super admins).
+  // Espeja el corte de auth/resolve.ts del backend. Ver RFC 0006 (mirror:manage).
   const can = useCallback(
-    (capability: string): boolean =>
-      capabilities.includes("*") || capabilities.includes(capability),
+    (capability: string): boolean => {
+      if (capability === "mirror:manage") return capabilities.includes(capability);
+      return capabilities.includes("*") || capabilities.includes(capability);
+    },
     [capabilities],
   );
 

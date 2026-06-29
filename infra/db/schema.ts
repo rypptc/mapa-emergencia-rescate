@@ -698,6 +698,10 @@ export const users = pgTable(
     roleId: text("role_id"), // rol base (bundle). NULL = sin rol (solo grants)
     orgId: text("org_id"), // fase 2
     status: text("status").notNull().default("invited"), // invited|active|disabled
+    // Super admin: tier por ENCIMA del admin semilla. Único que puede gestionar
+    // la réplica pública (capability mirror:manage, con corte en resolve.ts). El
+    // admin semilla normal NO la tiene. Ver RFC 0006.
+    isSuperAdmin: boolean("is_super_admin").notNull().default(false),
     createdAt: epochMs("created_at").notNull(),
     lastLoginAt: epochMs("last_login_at"),
   },
@@ -852,5 +856,33 @@ export const apiKeys = pgTable(
   (t) => [
     uniqueIndex("idx_api_keys_hash").on(t.keyHash), // lookup O(1) en auth
     index("idx_api_keys_user").on(t.userId), // listar "mis llaves"
+  ],
+);
+
+/* ------------------------------------------------------------ hub_credentials */
+// Credenciales de acceso a la RÉPLICA PÚBLICA (hub Postgres, RFC 0006). Cada fila
+// representa un consumidor externo al que un super admin le dio acceso SQL crudo.
+// El backend, al emitirla: (1) crea un ROL Postgres `consumer_<id>` en el hub con
+// password generada, (2) abre la IP del consumidor en el firewall mapa-hub-fw vía
+// la API de Hetzner. Esta tabla es el LIBRO MAYOR para poder revocar ambas cosas.
+// La password NUNCA se guarda (se muestra una vez, como api_keys). `pgRole` y
+// `allowedIp` + `hetznerRuleRef` permiten deshacer rol y regla al revocar.
+export const hubCredentials = pgTable(
+  "hub_credentials",
+  {
+    id: text("id").primaryKey(),
+    consumerName: text("consumer_name").notNull(), // etiqueta humana ("ONG X")
+    pgRole: text("pg_role").notNull(), // rol creado en el hub (consumer_<id>)
+    allowedIp: text("allowed_ip").notNull(), // CIDR/IP whitelisteada en el firewall
+    hetznerRuleRef: text("hetzner_rule_ref"), // marca para ubicar/quitar la regla
+    createdBy: text("created_by").notNull(), // user.id (super admin) que la emitió
+    createdAt: epochMs("created_at").notNull(),
+    lastRotatedAt: epochMs("last_rotated_at"), // si se rota la password
+    revokedAt: epochMs("revoked_at"), // NULL = activa (soft delete)
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    uniqueIndex("idx_hub_credentials_role").on(t.pgRole), // un rol por credencial
+    index("idx_hub_credentials_active").on(t.revokedAt),
   ],
 );

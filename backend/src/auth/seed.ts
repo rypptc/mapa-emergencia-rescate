@@ -14,7 +14,7 @@
 import { randomUUID } from "crypto";
 import { sql } from "drizzle-orm";
 import { getDb, schema } from "@/db";
-import { CAPABILITIES, SYSTEM_ADMIN_ROLE } from "@/auth/capabilities";
+import { CAPABILITIES, SYSTEM_ADMIN_ROLE, MIRROR_MANAGE } from "@/auth/capabilities";
 import { hashPassword } from "@/auth/password";
 
 export async function seedAuth(): Promise<void> {
@@ -57,14 +57,25 @@ export async function seedAuth(): Promise<void> {
     console.log("[seed] rol 'admin' creado.");
   }
 
-  // Re-vincula TODAS las capacidades al admin (incluye las nuevas en cada deploy).
+  // Re-vincula TODAS las capacidades al admin (incluye las nuevas en cada deploy),
+  // EXCEPTO mirror:manage: esa NO se concede vía rol — está gateada por el flag
+  // is_super_admin (corte en auth/resolve.ts). Dejarla fuera del bundle evita un
+  // grant inerte que se activaría por error si el corte se quitara. RFC 0006.
   for (const cap of CAPABILITIES) {
+    if (cap.key === MIRROR_MANAGE) continue;
     await db
       .insert(schema.roleCapabilities)
       .values({ roleId: adminRoleId, capabilityKey: cap.key })
       .onConflictDoNothing();
   }
-  console.log("[seed] rol 'admin' con todas las capacidades.");
+  console.log("[seed] rol 'admin' con todas las capacidades (salvo mirror:manage).");
+
+  // Auto-sanación: quita cualquier grant de mirror:manage en CUALQUIER rol (p.ej.
+  // sembrado por una versión anterior del seed). Debe estar SOLO tras el flag
+  // is_super_admin, nunca en un rol. RFC 0006.
+  await db
+    .delete(schema.roleCapabilities)
+    .where(sql`${schema.roleCapabilities.capabilityKey} = ${MIRROR_MANAGE}`);
 
   // 2b) `apikey:manage` es self-service: TODO rol la lleva, para que cualquier
   // usuario invitado (cualquier rol) pueda crear/revocar SUS PROPIAS API keys.
@@ -88,7 +99,13 @@ export async function seedAuth(): Promise<void> {
       .where(sql`lower(${schema.users.email}) = ${seedEmail}`)
       .limit(1);
     if (found[0]) {
-      console.log(`[seed] superadmin ${seedEmail} ya existe — sin cambios.`);
+      // Idempotente: asegura que el admin semilla sea SUPER admin (único con
+      // mirror:manage, gestiona la réplica pública). Ver RFC 0006.
+      await db
+        .update(schema.users)
+        .set({ isSuperAdmin: true })
+        .where(sql`${schema.users.id} = ${found[0].id}`);
+      console.log(`[seed] superadmin ${seedEmail} ya existe — is_super_admin asegurado.`);
     } else {
       const seedPassword = process.env.SEED_ADMIN_PASSWORD;
       const passwordHash = seedPassword ? await hashPassword(seedPassword) : null;
@@ -100,6 +117,8 @@ export async function seedAuth(): Promise<void> {
         roleId: adminRoleId,
         orgId: null,
         status: passwordHash ? "active" : "invited",
+        // El admin semilla ES super admin (único con mirror:manage). RFC 0006.
+        isSuperAdmin: true,
         createdAt: now,
       });
       console.log(

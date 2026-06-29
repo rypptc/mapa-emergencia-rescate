@@ -18,6 +18,7 @@
  */
 import { and, eq, isNull, or, gt, inArray } from "drizzle-orm";
 import { getDb, schema } from "@/db";
+import { MIRROR_MANAGE } from "@/auth/capabilities";
 
 export interface AuthUser {
   id: string;
@@ -27,6 +28,13 @@ export interface AuthUser {
   status: string;
   /** True si su rol es el semilla "admin" (is_system). */
   isSystemAdmin: boolean;
+  /**
+   * True si es SUPER admin (users.is_super_admin): tier por encima del admin
+   * semilla. Único que puede `mirror:manage` (gestionar la réplica pública). El
+   * corte en userHasCapability exige este flag para esa capacidad — ni el admin
+   * semilla pasa sin él. Ver RFC 0006.
+   */
+  isSuperAdmin: boolean;
   /**
    * Si la sesión se autenticó con una API KEY, aquí van los scopes de esa llave
    * (subconjunto de capabilities). El permiso efectivo se ACOTA a este set: una
@@ -52,6 +60,7 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
       orgId: schema.users.orgId,
       status: schema.users.status,
       isSystem: schema.roles.isSystem,
+      isSuperAdmin: schema.users.isSuperAdmin,
     })
     .from(schema.users)
     .leftJoin(schema.roles, eq(schema.users.roleId, schema.roles.id))
@@ -67,6 +76,7 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
     orgId: u.orgId,
     status: u.status,
     isSystemAdmin: Boolean(u.isSystem),
+    isSuperAdmin: Boolean(u.isSuperAdmin),
   };
 }
 
@@ -83,6 +93,12 @@ export async function userHasCapability(
   // sus scopes — aun para el admin semilla. Esto hace la llave least-privilege
   // (no un alias total). Va ANTES del short-circuit de admin a propósito.
   if (user.apiKeyScopes && !user.apiKeyScopes.includes(capability)) return false;
+
+  // 0.5) Corte de super admin: `mirror:manage` (gestionar la réplica pública) es
+  // la capacidad más sensible. Se exige el flag is_super_admin INCLUSO al admin
+  // semilla — por eso va ANTES de su short-circuit. Así un admin normal no puede
+  // abrir el puerto público ni crear credenciales de DB.
+  if (capability === MIRROR_MANAGE) return user.isSuperAdmin === true;
 
   // 1) Admin semilla: todo (lo que el techo de scope no haya cortado ya).
   if (user.isSystemAdmin) return true;
@@ -156,7 +172,11 @@ async function resolveFromDb(user: AuthUser, capability: string): Promise<boolea
  * Para el endpoint /me y la UI. El admin semilla devuelve "*" como marcador.
  */
 export async function effectiveCapabilities(user: AuthUser): Promise<string[]> {
-  if (user.isSystemAdmin) return ["*"];
+  // El admin semilla devuelve "*" (comodín). PERO `mirror:manage` está fuera del
+  // comodín: solo aparece si is_super_admin. Así la UI gatea la pestaña de la
+  // réplica por la presencia EXPLÍCITA de mirror:manage, no por "*" — un admin
+  // normal con "*" NO la verá. El gate real igual está en userHasCapability.
+  if (user.isSystemAdmin) return user.isSuperAdmin ? ["*", MIRROR_MANAGE] : ["*"];
   const db = getDb();
   const fromRole = user.roleId
     ? await db

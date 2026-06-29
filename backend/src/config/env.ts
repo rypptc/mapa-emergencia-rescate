@@ -72,6 +72,21 @@ const schema = z.object({
   // apuntan a la API pública y a la emergencia del terremoto de Venezuela.
   RESPONSEGRID_API_URL: z.string().default("https://api.responsegrid.app"),
   RESPONSEGRID_EMERGENCY_SLUG: z.string().default("terremoto-venezuela-2026"),
+
+  // --- Réplica pública (hub SQL, RFC 0006). Todo OPCIONAL: si falta, la gestión
+  // de la réplica queda desactivada (el endpoint responde 503), igual que
+  // Turnstile sin secret en dev. Se setean cuando el hub está provisto (tofu). ---
+  // Conexión del rol CREATEROLE del backend hacia el hub (red privada). Es la
+  // que crea/borra roles de consumidor. Output tofu `hub_admin_url`.
+  HUB_ADMIN_DATABASE_URL: z.string().optional(),
+  // Host PÚBLICO del hub que se entrega al consumidor en la cadena de conexión.
+  HUB_PUBLIC_HOST: z.string().optional(),
+  HUB_DB_NAME: z.string().default("public_db"),
+  // Token Hetzner con permiso de escribir firewalls (idealmente scoped). Se usa
+  // para abrir/cerrar la IP del consumidor en mapa-hub-fw.
+  HCLOUD_TOKEN: z.string().optional(),
+  // id (numérico) del firewall mapa-hub-fw a editar. Output del firewall en HCloud.
+  HUB_FIREWALL_ID: z.coerce.number().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

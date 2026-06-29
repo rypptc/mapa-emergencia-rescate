@@ -13,3 +13,15 @@ valkey_password      = "from openssl rand -hex 32"
 # postgres_app_db      = "app"
 # postgres_imported_db = "imported"
 # postgres_volume_size = 40
+
+# --- Hub Postgres (réplica pública saneada, RFC 0006) ---
+hub_repl_password  = "from openssl rand -hex 32"
+hub_admin_password = "from openssl rand -hex 32"
+# Allowlists del firewall del hub. Vacío = cerrado a internet (replicación
+# privada sigue OK). Agrega IPs de admin/consumidores cuando toque.
+# hub_admin_ips    = ["TU.IP.ADMIN/32"]
+# hub_consumer_ips = ["IP.DEL.CONSUMIDOR/32"]
+# hub_private_ip      = "10.0.1.12"
+# hub_db              = "public_db"
+# hub_volume_size     = 40
+# hub_consumer_pg_hba = "0.0.0.0/0"   # control de IP delegado al firewall

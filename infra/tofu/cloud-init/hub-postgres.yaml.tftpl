@@ -1,0 +1,52 @@
+#cloud-config
+# Hub Postgres (réplica pública saneada). cloud-init de primer boot:
+#  - instala Postgres,
+#  - crea la base pública `public_db`,
+#  - genera un cert TLS self-signed y fuerza ssl=on (hostssl en pg_hba),
+#  - default_transaction_read_only=on (cinturón: consumidores no escriben),
+#  - rol de replicación (lo usa el SUBSCRIPTION para jalar del primario),
+#  - rol admin con CREATEROLE (lo usará el backend para crear roles de
+#    consumidor con su password; NO superuser — least-privilege),
+#  - pg_hba: replicación desde la red privada + consumidores por hostssl (TLS).
+#
+# La suscripción, la lista de tablas publicadas y los roles de consumidor NO van
+# aquí: se crean después (runbook RFC 0006), porque dependen del primario ya
+# configurado (wal_level=logical + PUBLICATION) y del esquema migrado en el hub.
+package_update: true
+packages: [postgresql, openssl]
+runcmd:
+  # --- base + roles ---
+  - sudo -u postgres psql -c "CREATE DATABASE ${hub_db};"
+  # rol de replicación: LOGIN + REPLICATION, lo usa CREATE SUBSCRIPTION en el hub
+  # para conectarse al primario. (En el hub es el "apply worker"; en el primario
+  # existe un rol homónimo con SELECT sobre lo publicado — ver runbook.)
+  - sudo -u postgres psql -c "CREATE ROLE ${hub_repl_user} WITH LOGIN REPLICATION PASSWORD '${hub_repl_pass}';"
+  # rol admin para el backend: crea/borra roles de consumidor. CREATEROLE, NO
+  # superuser. Sin acceso a datos sensibles (el hub no tiene PII de todos modos).
+  - sudo -u postgres psql -c "CREATE ROLE ${hub_admin_user} WITH LOGIN CREATEROLE PASSWORD '${hub_admin_pass}';"
+  - sudo -u postgres psql -c "GRANT CONNECT ON DATABASE ${hub_db} TO ${hub_admin_user};"
+
+  # --- TLS self-signed (consumidores usan sslmode=require/verify-full) ---
+  - PGDIR=$(ls -d /etc/postgresql/*/main)
+  - DATADIR=$(sudo -u postgres psql -tAc "SHOW data_directory;")
+  - openssl req -new -x509 -days 3650 -nodes -text -subj "/CN=mapa-hub-postgres" -out "$DATADIR/server.crt" -keyout "$DATADIR/server.key"
+  - chmod 600 "$DATADIR/server.key" && chown postgres:postgres "$DATADIR/server.key" "$DATADIR/server.crt"
+
+  # --- postgresql.conf ---
+  - echo "listen_addresses = '*'"               >> $PGDIR/postgresql.conf
+  - echo "ssl = on"                              >> $PGDIR/postgresql.conf
+  - echo "default_transaction_read_only = on"    >> $PGDIR/postgresql.conf
+
+  # --- pg_hba.conf ---
+  # 1) replicación + lectura desde la red PRIVADA (el SUBSCRIPTION del hub jala del
+  #    primario; y admin/repl ops internas). scram sobre la red privada.
+  - echo "host    all    ${hub_repl_user}    ${primary_cidr}    scram-sha-256"  >> $PGDIR/pg_hba.conf
+  - echo "host    all    ${hub_admin_user}   ${primary_cidr}    scram-sha-256"  >> $PGDIR/pg_hba.conf
+  # 2) admin del backend también por la red privada (el backend corre en k3s, red
+  #    privada). Si el backend estuviera fuera, ajustar este origen.
+  # 3) consumidores externos: SOLO hostssl (TLS obligatorio) a public_db. El
+  #    origen lo define la plantilla (var hub_consumer_pg_hba); el firewall de
+  #    Hetzner ya filtra por IP antes — esto es defensa en profundidad.
+  - echo "hostssl ${hub_db} all ${consumer_access} scram-sha-256"               >> $PGDIR/pg_hba.conf
+
+  - systemctl restart postgresql
