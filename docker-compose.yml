@@ -86,6 +86,7 @@ services:
       CORS_ORIGINS: http://localhost:3000
       TRUSTED_IP_HEADER: "" # dev: cae a req.ip
       IP_SALT: localdev-salt
+      PATIENT_DOCUMENT_HASH_SECRET: local-dev-patient-document-hash-secret-0123456789
       ADMIN_PASSWORD: localadmin
       # Turnstile DESACTIVADO en local (sin secret → requireHuman deja pasar).
       # --- Auth api/public/* (JWT cookie + Bearer) ---

@@ -78,6 +78,13 @@
       "when": 1782751107450,
       "tag": "0010_zippy_zzzax",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1782765668835,
+      "tag": "0011_big_genesis",
+      "breakpoints": true
     }
   ]
 }

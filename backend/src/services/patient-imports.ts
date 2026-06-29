@@ -16,13 +16,15 @@
 
 import { createHash, randomUUID } from "crypto";
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { env } from "@/config/env";
 import { getDb, schema } from "@/db";
 import type { PatientCondition, PatientStatus } from "@/services/patients";
 import {
   classifyDedup,
-  documentDigits,
+  hashDocumentDigits,
   nameKey,
   normalizeRow,
+  resolveHospitalAlias,
   validateRow,
   type DedupCandidate,
   type RawPatientRow,
@@ -182,6 +184,19 @@ function hashIdempotencyKey(key: string | undefined): string | null {
   const trimmed = key?.trim();
   if (!trimmed) return null;
   return createHash("sha256").update(trimmed).digest("hex");
+}
+
+/**
+ * HMAC del documento a partir de sus dígitos normalizados. Degrada a `null` si no
+ * hay dígitos útiles o si falta el secreto (dev local sin configurar): en ese
+ * caso simplemente no hay dedup exacta por documento, nunca rompe el flujo. En
+ * producción el secreto es obligatorio (validado en `env.ts`).
+ */
+function documentHashFor(digits: string | null): string | null {
+  if (!digits) return null;
+  const secret = env.PATIENT_DOCUMENT_HASH_SECRET;
+  if (!secret) return null;
+  return hashDocumentDigits(digits, secret);
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -480,12 +495,15 @@ async function resolveHospitalId(
   }
   const txt = sourceHospital.trim();
   if (!txt) return null;
+  // Alias curado primero (mapa explícito y mínimo): si el texto coincide con un
+  // alias conocido, resolvemos contra su nombre canónico. Vacío hoy = no-op.
+  const canonical = resolveHospitalAlias(txt) ?? txt;
   // Nombre exacto case-insensitive. Si hay ambigüedad (≥2) NO resolvemos: que el
   // operador desambigüe con el id explícito (evita asignar al hospital equivocado).
   const byName = await db
     .select({ id: hospitals.id })
     .from(hospitals)
-    .where(sql`lower(${hospitals.name}) = lower(${txt})`)
+    .where(sql`lower(${hospitals.name}) = lower(${canonical})`)
     .limit(2);
   return byName.length === 1 ? (byName[0]?.id ?? null) : null;
 }
@@ -498,12 +516,14 @@ async function loadHospitalCandidates(
   const cached = cache.get(hospitalId);
   if (cached) return cached;
   const db = getDb();
+  // Documento por su columna dedicada (HMAC). NO se deriva de `notes` para evitar
+  // leer la cédula cruda de pacientes existentes (B4/Q4).
   const patients = await db
     .select({
       id: hospitalPatients.id,
       name: hospitalPatients.name,
       age: hospitalPatients.age,
-      notes: hospitalPatients.notes,
+      documentHash: hospitalPatients.documentHash,
     })
     .from(hospitalPatients)
     .where(eq(hospitalPatients.hospitalId, hospitalId));
@@ -515,7 +535,7 @@ async function loadHospitalCandidates(
       patientId: p.id,
       name: p.name,
       age: p.age ?? null,
-      documentDigits: documentDigits(p.notes),
+      documentHash: p.documentHash ?? null,
     };
     const list = byKey.get(key);
     if (list) list.push(cand);
@@ -523,6 +543,61 @@ async function loadHospitalCandidates(
   }
   cache.set(hospitalId, byKey);
   return byKey;
+}
+
+/**
+ * Candidatos por DOCUMENTO exacto (HMAC), independientes del nombre. El bloqueo
+ * por `nameKey` de `loadHospitalCandidates` jamás vería un paciente con el MISMO
+ * documento pero distinto nombre; este lookup directo `(hospital_id,
+ * document_hash)` cierra ese hueco (lo respalda el índice parcial
+ * `idx_hospital_patients_document_hash`). Cacheado por `(hospital, hash)` para no
+ * repetir la query dentro del lote.
+ */
+async function loadDocumentHashCandidates(
+  hospitalId: string,
+  documentHash: string,
+  cache: Map<string, DedupCandidate[]>,
+): Promise<DedupCandidate[]> {
+  const key = `${hospitalId}::${documentHash}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+  const db = getDb();
+  const patients = await db
+    .select({
+      id: hospitalPatients.id,
+      name: hospitalPatients.name,
+      age: hospitalPatients.age,
+      documentHash: hospitalPatients.documentHash,
+    })
+    .from(hospitalPatients)
+    .where(
+      and(
+        eq(hospitalPatients.hospitalId, hospitalId),
+        eq(hospitalPatients.documentHash, documentHash),
+      ),
+    );
+  const candidates: DedupCandidate[] = patients.map((p) => ({
+    patientId: p.id,
+    name: p.name,
+    age: p.age ?? null,
+    documentHash: p.documentHash ?? null,
+  }));
+  cache.set(key, candidates);
+  return candidates;
+}
+
+/** Une listas de candidatos sin duplicar por `patientId` (mantiene el orden). */
+function mergeCandidatesUnique(...lists: DedupCandidate[][]): DedupCandidate[] {
+  const seen = new Set<string>();
+  const out: DedupCandidate[] = [];
+  for (const list of lists) {
+    for (const cand of list) {
+      if (seen.has(cand.patientId)) continue;
+      seen.add(cand.patientId);
+      out.push(cand);
+    }
+  }
+  return out;
 }
 
 /**
@@ -551,9 +626,13 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
     .orderBy(asc(patientImportRows.rowIndex))) as RawStagingRow[];
 
   const candidateCache = new Map<string, Map<string, DedupCandidate[]>>();
-  // Dedup INTRA-lote: la primera fila válida de una (hospital, clave) "gana"; las
-  // siguientes idénticas se marcan duplicadas contra ella.
-  const seenInBatch = new Map<string, DedupCandidate[]>();
+  const documentHashCache = new Map<string, DedupCandidate[]>();
+  // Dedup INTRA-lote: la primera fila válida "gana"; las siguientes idénticas se
+  // marcan duplicadas contra ella. Dos índices: por (hospital, clave de nombre) y
+  // por (hospital, document_hash), para que un mismo documento con distinto nombre
+  // dentro del lote también se detecte como duplicado fuerte.
+  const seenByNameInBatch = new Map<string, DedupCandidate[]>();
+  const seenByDocInBatch = new Map<string, DedupCandidate[]>();
 
   let valid = 0;
   let invalid = 0;
@@ -563,8 +642,13 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
 
   for (const raw of rawRows) {
     const norm = normalizeRow((raw.rawData ?? {}) as RawPatientRow);
+    // Deriva el HMAC del documento ANTES de tocar dedup/persistencia: queda
+    // guardado en staging y se persiste en el paciente final, así la purga del
+    // crudo (C5) no pierde la capacidad de dedup exacta por documento.
+    norm.documentHash = documentHashFor(norm.documentDigits);
     const hospitalId = await resolveHospitalId(norm.hospitalIdHint, norm.sourceHospital);
-    const { errors } = validateRow(norm, hospitalId !== null);
+    const { errors, hospitalUnresolved } = validateRow(norm, hospitalId !== null);
+    const warnings = [...norm.warnings];
 
     let rowStatus: string;
     let dedupStatus = "pending";
@@ -574,15 +658,35 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
     if (errors.length > 0) {
       rowStatus = "invalid";
       invalid++;
+    } else if (hospitalUnresolved) {
+      // B2/Q3: hay texto/id de hospital pero no resolvió a uno único. NO se aplica
+      // ni se descarta: queda para revisión manual con un aviso claro.
+      rowStatus = "needs_review";
+      dedupStatus = "needs_review";
+      review++;
+      warnings.push(
+        "No se pudo resolver el hospital indicado a uno único; requiere revisión manual antes de aplicar.",
+      );
     } else {
-      // Candidatos: existentes en DB + ya vistos en este lote (mismo hospital+clave).
-      const batchKey = `${hospitalId}::${norm.normalizedKey}`;
-      const dbCandidates =
+      // Candidatos: existentes en DB + ya vistos en este lote. Se cruzan DOS
+      // señales independientes — por clave de nombre y por document_hash exacto —
+      // para que un mismo documento con distinto nombre también se deduplique.
+      const nameBatchKey = `${hospitalId}::${norm.normalizedKey}`;
+      const docBatchKey = norm.documentHash ? `${hospitalId}::${norm.documentHash}` : null;
+
+      const dbByName =
         norm.normalizedKey && hospitalId
           ? (await loadHospitalCandidates(hospitalId, candidateCache)).get(norm.normalizedKey) ?? []
           : [];
-      const batchCandidates = seenInBatch.get(batchKey) ?? [];
-      const verdict = classifyDedup(norm, [...dbCandidates, ...batchCandidates]);
+      const dbByDoc =
+        norm.documentHash && hospitalId
+          ? await loadDocumentHashCandidates(hospitalId, norm.documentHash, documentHashCache)
+          : [];
+      const batchByName = seenByNameInBatch.get(nameBatchKey) ?? [];
+      const batchByDoc = docBatchKey ? seenByDocInBatch.get(docBatchKey) ?? [] : [];
+
+      const candidatePool = mergeCandidatesUnique(dbByName, dbByDoc, batchByName, batchByDoc);
+      const verdict = classifyDedup(norm, candidatePool);
       dedupStatus = verdict.status;
       confidence = verdict.confidence;
       candidates = verdict.candidates;
@@ -590,15 +694,19 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
       if (verdict.status === "unique") {
         rowStatus = "valid";
         valid++;
-        // Esta fila ahora es candidata para las siguientes del lote.
+        // Esta fila ahora es candidata para las siguientes del lote (por ambos índices).
         const self: DedupCandidate = {
           patientId: `row:${raw.id}`,
           name: norm.name,
           age: norm.age,
-          documentDigits: norm.documentDigits,
+          documentHash: norm.documentHash,
         };
-        if (batchCandidates.length) batchCandidates.push(self);
-        else seenInBatch.set(batchKey, [self]);
+        if (batchByName.length) batchByName.push(self);
+        else seenByNameInBatch.set(nameBatchKey, [self]);
+        if (docBatchKey) {
+          if (batchByDoc.length) batchByDoc.push(self);
+          else seenByDocInBatch.set(docBatchKey, [self]);
+        }
       } else if (verdict.status === "duplicate") {
         rowStatus = "duplicate";
         duplicate++;
@@ -618,8 +726,9 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
         status: norm.status,
         sourceHospital: norm.sourceHospital,
         hospitalId,
+        documentHash: norm.documentHash,
         validationErrors: errors,
-        validationWarnings: norm.warnings,
+        validationWarnings: warnings,
         dedupStatus,
         dedupCandidates: candidates,
         confidence,
@@ -657,6 +766,7 @@ interface ApplyableRow {
   condition: string | null;
   status: string | null;
   hospitalId: string | null;
+  documentHash: string | null;
 }
 
 function normalizePatientCondition(value: string | null): PatientCondition {
@@ -675,7 +785,8 @@ async function applyOneRowAtomically(rowId: string): Promise<string | null> {
   const db = getDb();
   return db.transaction(async (tx) => {
     const locked = (await tx.execute(sql`
-      select id, name, age, condition, status, hospital_id as "hospitalId"
+      select id, name, age, condition, status, hospital_id as "hospitalId",
+             document_hash as "documentHash"
       from patient_import_rows
       where id = ${rowId}
         and row_status = 'valid'
@@ -691,12 +802,13 @@ async function applyOneRowAtomically(rowId: string): Promise<string | null> {
     const age = row.age === null || row.age === undefined ? null : Math.max(0, Math.trunc(Number(row.age)));
     const condition = normalizePatientCondition(row.condition);
     const status = normalizePatientStatus(row.status);
+    const documentHash = row.documentHash ?? null;
 
     await tx.execute(sql`
       insert into hospital_patients
-        (id, hospital_id, name, age, condition, status, notes, contact, admitted_at, updated_at)
+        (id, hospital_id, name, age, condition, status, notes, contact, document_hash, admitted_at, updated_at)
       values
-        (${patientId}, ${row.hospitalId}, ${name}, ${age}, ${condition}, ${status}, '', '', ${now}, ${now})
+        (${patientId}, ${row.hospitalId}, ${name}, ${age}, ${condition}, ${status}, '', '', ${documentHash}, ${now}, ${now})
     `);
     await tx
       .update(patientImportRows)
@@ -808,8 +920,11 @@ export async function markImportFailed(
  *    campos derivados y `patient_id` (idempotencia del apply intacta).
  *  - No se conecta a ningún cron/endpoint automático: queda lista pero dormida.
  *
- * Cautela a futuro: cuando exista `document_hash` (RFC 0006), asegurarse de
- * persistir los derivados ANTES de purgar el crudo del que se calculan.
+ * Invariante de derivados: `document_hash` (HMAC) se calcula y persiste en
+ * `processImport` y se copia al paciente final en `applyImport`, ambos ANTES de
+ * cualquier purga. Por eso vaciar `raw_data` aquí no pierde la capacidad de dedup
+ * exacta por documento. Cualquier derivado nuevo del crudo debe seguir esta misma
+ * regla: persistir antes de purgar.
  */
 export async function purgeAppliedRawData(opts: {
   olderThanMs: number;

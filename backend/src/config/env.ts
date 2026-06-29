@@ -44,6 +44,9 @@ const schema = z.object({
 
   // Privacidad: sal para hashear IPs antes de persistir. Sin esto, hashIp lanza.
   IP_SALT: z.string().optional(),
+  // Privacidad: secreto HMAC para documentos de pacientes importados. Permite
+  // dedup exacta sin guardar cédulas/documentos crudos fuera de staging.
+  PATIENT_DOCUMENT_HASH_SECRET: z.string().optional(),
 
   // Cabecera de IP de confianza. Detrás de Cloudflare debe ser cf-connecting-ip
   // (el cliente NO puede falsificarla). Default a cf-connecting-ip aquí porque el
@@ -81,6 +84,12 @@ export const env = parsed.data;
 if (env.NODE_ENV === "production") {
   if (!env.JWT_SECRET || env.JWT_SECRET.length < 32) {
     console.error("❌ JWT_SECRET es obligatorio y debe tener >=32 caracteres en producción.");
+    process.exit(1);
+  }
+  if (!env.PATIENT_DOCUMENT_HASH_SECRET || env.PATIENT_DOCUMENT_HASH_SECRET.length < 32) {
+    console.error(
+      "❌ PATIENT_DOCUMENT_HASH_SECRET es obligatorio y debe tener >=32 caracteres en producción.",
+    );
     process.exit(1);
   }
   if (!env.COOKIE_SECURE) {

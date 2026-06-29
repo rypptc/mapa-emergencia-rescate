@@ -180,6 +180,9 @@ export const hospitalPatients = pgTable(
     status: text("status").notNull().default("hospitalized"),
     notes: text("notes").notNull().default(""),
     contact: text("contact").notNull().default(""),
+    // HMAC del documento/cédula normalizado. Permite dedup exacta sin guardar el
+    // documento crudo en la tabla final.
+    documentHash: text("document_hash"),
     admittedAt: epochMs("admitted_at").notNull(),
     updatedAt: epochMs("updated_at").notNull(),
   },
@@ -189,6 +192,9 @@ export const hospitalPatients = pgTable(
       t.status,
       t.admittedAt.desc(),
     ),
+    index("idx_hospital_patients_document_hash")
+      .on(t.hospitalId, t.documentHash)
+      .where(sql`document_hash IS NOT NULL`),
   ],
 );
 
@@ -270,6 +276,8 @@ export const patientImportRows = pgTable(
     // Dato CRUDO de entrada + campos sensibles (documento/notas/contacto).
     // RESTRINGIDO: no se serializa hacia respuestas públicas.
     rawData: jsonb("raw_data").notNull().default({}),
+    // HMAC del documento/cédula normalizado. El crudo queda solo en raw_data.
+    documentHash: text("document_hash"),
     validationErrors: jsonb("validation_errors").notNull().default([]),
     validationWarnings: jsonb("validation_warnings").notNull().default([]),
     // pending | unique | duplicate | needs_review
@@ -287,6 +295,9 @@ export const patientImportRows = pgTable(
   (t) => [
     index("idx_patient_import_rows_import").on(t.importId, t.rowIndex),
     index("idx_patient_import_rows_status").on(t.importId, t.rowStatus),
+    // Nota: NO indexamos (import_id, document_hash). La dedup intra-lote por
+    // documento se resuelve en memoria durante `processImport` (no hay query por
+    // esta combinación), así que el índice sería peso muerto.
   ],
 );
 

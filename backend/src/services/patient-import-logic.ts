@@ -8,6 +8,8 @@
  * estado en español) sin levantar Postgres.
  */
 
+import { createHmac } from "crypto";
+
 import type { PatientCondition, PatientStatus } from "@/services/patients";
 
 /** Fila CRUDA de entrada (fase 1: JSON estructurado). Campos abiertos + extras. */
@@ -39,6 +41,8 @@ export interface NormalizedRow {
   hospitalIdHint: string | null;
   /** Solo dígitos del documento (para match exacto). null si no hubo. */
   documentDigits: string | null;
+  /** HMAC del documento/cédula normalizado. null si no hubo documento útil. */
+  documentHash: string | null;
   notes: string;
   contact: string;
   warnings: string[];
@@ -136,6 +140,42 @@ export function documentDigits(raw: string | undefined | null): string | null {
   return d.length >= 4 ? d : null;
 }
 
+/**
+ * HMAC-SHA256 del documento (solo dígitos) con el secreto de servidor. Pura dado
+ * (digits, secret): permite dedup exacta por documento SIN guardar la cédula
+ * cruda fuera del staging restringido. El secreto NO viaja en el dato derivado.
+ */
+export function hashDocumentDigits(digits: string, secret: string): string {
+  return createHmac("sha256", secret).update(digits).digest("hex");
+}
+
+/**
+ * Clave normalizada de hospital para alias/resolución: minúsculas, sin acentos,
+ * solo alfanumérico y espacios colapsados. "Hosp. Central" → "hosp central".
+ */
+export function hospitalNameKey(raw: string | undefined | null): string {
+  const base = stripAccents((raw ?? "").toLowerCase());
+  return base
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Alias curados de hospital (clave normalizada → nombre canónico tal como vive en
+ * `hospitals.name`). MÍNIMO y explícito: el equipo agrega entradas verificadas;
+ * NO se inventan nombres reales aquí. Vacío hoy = sin reescritura (la resolución
+ * cae al match exacto por nombre). Mantener determinista y testeable.
+ */
+export const HOSPITAL_ALIASES: Readonly<Record<string, string>> = Object.freeze({});
+
+/** Devuelve el nombre canónico si el texto coincide con un alias curado; si no, null. */
+export function resolveHospitalAlias(raw: string | undefined | null): string | null {
+  const key = hospitalNameKey(raw);
+  if (!key) return null;
+  return HOSPITAL_ALIASES[key] ?? null;
+}
+
 /** Mapea condición de entrada a enum; default "unknown" + aviso si no se reconoce. */
 export function mapCondition(raw: string | undefined): {
   value: PatientCondition;
@@ -183,6 +223,7 @@ export function normalizeRow(raw: RawPatientRow): NormalizedRow {
     sourceHospital: (raw.hospital ?? "").trim().slice(0, 200),
     hospitalIdHint: raw.hospitalId?.trim() ? raw.hospitalId.trim().slice(0, 120) : null,
     documentDigits: documentDigits(raw.documentId),
+    documentHash: null,
     notes: (raw.notes ?? "").trim().slice(0, 600),
     contact: (raw.contact ?? "").trim().slice(0, 120),
     warnings,
@@ -192,22 +233,28 @@ export function normalizeRow(raw: RawPatientRow): NormalizedRow {
 /**
  * Valida la identidad mínima de una fila normalizada DESPUÉS de intentar
  * resolver el hospital. `hospitalResolved` = true si el orquestador encontró el
- * hospital. Un error => la fila NO es aplicable (rowStatus "invalid").
+ * hospital.
+ *
+ * Distingue dos fallos de hospital (B2/Q3):
+ *   - SIN texto ni id de hospital  → `errors` (rowStatus "invalid": no hay nada
+ *     que resolver, dato incompleto de origen).
+ *   - CON texto/id pero no resuelto → `hospitalUnresolved` (rowStatus
+ *     "needs_review": hay una pista válida, requiere desambiguación manual; NO se
+ *     descarta ni se aplica, no se pierde).
+ *
+ * Un `errors` no vacío => la fila NO es aplicable (rowStatus "invalid").
  */
 export function validateRow(
   row: NormalizedRow,
   hospitalResolved: boolean,
-): { errors: string[] } {
+): { errors: string[]; hospitalUnresolved: boolean } {
   const errors: string[] = [];
   if (!row.name) errors.push("Falta el nombre del paciente.");
-  if (!hospitalResolved) {
-    errors.push(
-      row.sourceHospital || row.hospitalIdHint
-        ? "No se pudo resolver el hospital indicado."
-        : "Falta el hospital (texto o id resoluble).",
-    );
+  const hasHospitalInput = Boolean(row.sourceHospital || row.hospitalIdHint);
+  if (!hasHospitalInput) {
+    errors.push("Falta el hospital (texto o id resoluble).");
   }
-  return { errors };
+  return { errors, hospitalUnresolved: hasHospitalInput && !hospitalResolved };
 }
 
 /** Candidato de duplicado contra un paciente ya existente (o de este mismo lote). */
@@ -215,8 +262,8 @@ export interface DedupCandidate {
   patientId: string;
   name: string;
   age: number | null;
-  /** Dígitos de documento detectados en las notas del candidato (si hubo). */
-  documentDigits: string | null;
+  /** HMAC del documento/cédula normalizado (si hubo). */
+  documentHash: string | null;
   reason?: string;
 }
 
@@ -229,17 +276,17 @@ export interface DedupVerdict {
   candidates: DedupCandidate[];
 }
 
-/** ¿Las edades son compatibles? (iguales, o al menos una desconocida). */
-function ageCompatible(a: number | null, b: number | null): boolean {
-  if (a === null || b === null) return true;
-  return a === b;
+/** ¿Ambas edades son conocidas e iguales? */
+function sameKnownAge(a: number | null, b: number | null): boolean {
+  return a !== null && b !== null && a === b;
 }
 
 /**
  * Clasifica una fila contra sus candidatos (mismo hospital + misma clave de
  * nombre). Política conservadora (primera versión, sin trigram):
- *   - documento EXACTO compartido      → duplicate (confidence 1.0)
- *   - nombre+edad compatibles          → duplicate (confidence 0.9)
+ *   - document_hash EXACTO compartido  → duplicate (confidence 1.0)
+ *   - nombre+edad conocida igual       → duplicate (confidence 0.9)
+ *   - nombre igual, edad desconocida   → needs_review (confidence 0.6)
  *   - nombre igual, edad incompatible  → needs_review (confidence 0.5)
  *   - sin candidatos                   → unique (confidence 0.0)
  * NUNCA auto-mergea: "duplicate"/"needs_review" se OMITEN en el apply.
@@ -255,24 +302,33 @@ export function classifyDedup(
   }
 
   // 1) Match exacto por documento (la señal más fuerte).
-  if (row.documentDigits) {
-    const docMatch = candidates.filter((c) => c.documentDigits === row.documentDigits);
+  if (row.documentHash) {
+    const docMatch = candidates.filter((c) => c.documentHash === row.documentHash);
     if (docMatch.length > 0) {
       return {
         status: "duplicate",
         confidence: 1,
-        candidates: docMatch.map((c) => ({ ...c, reason: "documento exacto" })),
+        candidates: docMatch.map((c) => ({ ...c, reason: "document_hash exacto" })),
       };
     }
   }
 
   // 2) Mismo nombre normalizado (los candidatos ya vienen filtrados por clave).
-  const ageOk = candidates.filter((c) => ageCompatible(row.age, c.age));
-  if (ageOk.length > 0) {
+  const sameAge = candidates.filter((c) => sameKnownAge(row.age, c.age));
+  if (sameAge.length > 0) {
     return {
       status: "duplicate",
       confidence: 0.9,
-      candidates: ageOk.map((c) => ({ ...c, reason: "nombre y edad compatibles" })),
+      candidates: sameAge.map((c) => ({ ...c, reason: "nombre y edad conocida igual" })),
+    };
+  }
+
+  const unknownAge = candidates.filter((c) => row.age === null || c.age === null);
+  if (unknownAge.length > 0) {
+    return {
+      status: "needs_review",
+      confidence: 0.6,
+      candidates: unknownAge.map((c) => ({ ...c, reason: "mismo nombre, edad desconocida" })),
     };
   }
 
