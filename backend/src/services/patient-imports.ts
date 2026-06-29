@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from "crypto";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db";
 import {
   createPatient,
@@ -599,4 +599,56 @@ export async function markImportFailed(importId: string, summary: string): Promi
     .update(patientImports)
     .set({ status: "failed", errorSummary: summary.slice(0, 500), updatedAt: Date.now() })
     .where(eq(patientImports.id, importId));
+}
+
+/**
+ * C5 (#151) — MECANISMO de purga del crudo sensible (`raw_data`: cédula/notas/
+ * contacto), SIN política. La política (plazo, trigger, automatización) la decide
+ * el equipo después; esta función no la baked-in:
+ *
+ *  - `olderThanMs` es un parámetro EXPLÍCITO (no hay default de plazo).
+ *  - Dry-run por defecto: sin `confirm: true` NO borra nada, solo cuenta cuántas
+ *    filas se purgarían (para medir el impacto antes de decidir).
+ *  - Solo toca lotes ya `applied` (los pacientes finales ya se escribieron) y
+ *    aplicados antes del corte; vacía `raw_data` a `{}` conservando la fila, sus
+ *    campos derivados y `patient_id` (idempotencia del apply intacta).
+ *  - No se conecta a ningún cron/endpoint automático: queda lista pero dormida.
+ *
+ * Cautela a futuro: cuando exista `document_hash` (RFC 0006), asegurarse de
+ * persistir los derivados ANTES de purgar el crudo del que se calculan.
+ */
+export async function purgeAppliedRawData(opts: {
+  olderThanMs: number;
+  confirm?: boolean;
+}): Promise<{ matched: number; purged: number }> {
+  if (!Number.isFinite(opts.olderThanMs) || opts.olderThanMs < 0) {
+    throw new Error("purgeAppliedRawData: olderThanMs debe ser un número >= 0");
+  }
+  const db = getDb();
+  const cutoff = Date.now() - opts.olderThanMs;
+
+  // Subconjunto seguro: filas de lotes `applied` aplicados antes del corte cuyo
+  // raw_data aún tiene contenido (evita recontar filas ya purgadas).
+  const appliedOld = db
+    .select({ id: patientImports.id })
+    .from(patientImports)
+    .where(and(eq(patientImports.status, "applied"), lt(patientImports.appliedAt, cutoff)));
+  const targetWhere = and(
+    inArray(patientImportRows.importId, appliedOld),
+    sql`${patientImportRows.rawData} <> '{}'::jsonb`,
+  );
+
+  const counted = (await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(patientImportRows)
+    .where(targetWhere)) as { n: number }[];
+  const matched = counted[0]?.n ?? 0;
+
+  if (!opts.confirm) return { matched, purged: 0 }; // dry-run: no borra nada
+
+  await db
+    .update(patientImportRows)
+    .set({ rawData: {}, updatedAt: Date.now() })
+    .where(targetWhere);
+  return { matched, purged: matched };
 }
