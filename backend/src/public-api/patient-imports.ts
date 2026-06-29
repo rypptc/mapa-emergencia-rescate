@@ -25,6 +25,14 @@ import { notFound, badRequest, serviceUnavailable } from "@/lib/errors";
 import { writeAudit } from "@/auth/audit";
 import { enqueuePatientImport } from "@/lib/queues";
 import * as service from "@/services/patient-imports";
+import {
+  CONTENT_TYPE,
+  FILE_CONTENT_TYPES,
+  ImportParseError,
+  MAX_IMPORT_ROWS,
+  parseImportFile,
+} from "@/services/patient-import-parse";
+import type { RawPatientRow } from "@/services/patient-import-logic";
 
 export const patientImportsRouter = Router();
 
@@ -54,28 +62,81 @@ const rowSchema = z
   })
   .passthrough();
 
-const createSchema = z.object({
-  // `source` = etiqueta DECLARADA del origen del lote (p.ej. "telegram",
-  // "archivo-hospital-x"). La declara el cliente y NO es confiable: nunca
-  // representa autoría ni se usa para auth/dedup. La autoría VERIFICADA es el
-  // usuario autenticado (`created_by`, derivado de req.user en el route + en el
-  // audit_log). El modelado rico de procedencia (canal + referencia por-fila)
-  // está propuesto en docs/rfcs/0006-procedencia-ingesta-pacientes.md (#151).
-  source: z.string().trim().max(120).optional(),
-  // C7: fase 1 SOLO procesa JSON estructurado. Si el cliente declara otro
-  // contentType (p.ej. "text/csv"), lo rechazamos con 400 en vez de procesar el
-  // payload como JSON silenciosamente. Cuando entren CSV/XLSX (Fase 4) se amplía
-  // el set permitido.
-  contentType: z
-    .string()
-    .trim()
-    .max(120)
-    .optional()
-    .refine((v) => v === undefined || v === "application/json", {
-      message: 'Solo se admite contentType "application/json" en esta fase.',
-    }),
-  rows: z.array(rowSchema).min(1, "Envía al menos una fila.").max(2000, "Máximo 2000 filas por lote."),
-});
+// base64 de hasta ~4MB de archivo cabe en el body de 4mb (overhead ~33%). Cota
+// dura para rechazar temprano antes de decodificar (defensa en profundidad junto
+// a las cotas del parser).
+const MAX_FILE_BASE64_LEN = 4_000_000;
+
+const SUPPORTED_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  CONTENT_TYPE.JSON,
+  CONTENT_TYPE.CSV,
+  CONTENT_TYPE.XLSX,
+]);
+
+const createSchema = z
+  .object({
+    // `source` = etiqueta DECLARADA del origen del lote (p.ej. "telegram",
+    // "archivo-hospital-x"). La declara el cliente y NO es confiable: nunca
+    // representa autoría ni se usa para auth/dedup. La autoría VERIFICADA es el
+    // usuario autenticado (`created_by`, derivado de req.user en el route + en el
+    // audit_log). El modelado rico de procedencia (canal + referencia por-fila)
+    // está propuesto en docs/rfcs/0006-procedencia-ingesta-pacientes.md (#151).
+    source: z.string().trim().max(120).optional(),
+    // Fase 4: se admite JSON estructurado (`rows`) o un archivo TABULAR CSV/XLSX
+    // (`fileBase64`). Otro contentType se rechaza con 400 (no se procesa a ciegas).
+    contentType: z
+      .string()
+      .trim()
+      .max(120)
+      .optional()
+      .refine((v) => v === undefined || SUPPORTED_CONTENT_TYPES.has(v), {
+        message: 'contentType admitido: "application/json", "text/csv" o XLSX.',
+      }),
+    // JSON estructurado: filas directas (camino histórico, sin regresión).
+    rows: z
+      .array(rowSchema)
+      .min(1, "Envía al menos una fila.")
+      .max(MAX_IMPORT_ROWS, `Máximo ${MAX_IMPORT_ROWS} filas por lote.`)
+      .optional(),
+    // CSV/XLSX: el archivo va en base64 (sin multipart). Se parsea a `rows` en el
+    // route (acotado) ANTES de encolar; el trabajo pesado sigue en el worker.
+    fileBase64: z.string().max(MAX_FILE_BASE64_LEN, "Archivo demasiado grande.").optional(),
+  })
+  .superRefine((val, ctx) => {
+    const isFile = val.contentType !== undefined && FILE_CONTENT_TYPES.has(val.contentType);
+    if (isFile) {
+      if (!val.fileBase64) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["fileBase64"],
+          message: "Para CSV/XLSX envía el archivo en fileBase64.",
+        });
+      }
+      if (val.rows !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["rows"],
+          message: "Para CSV/XLSX usa fileBase64, no rows.",
+        });
+      }
+    } else {
+      // JSON (explícito o por defecto): exige `rows` y prohíbe `fileBase64`.
+      if (!val.rows) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["rows"],
+          message: "Envía al menos una fila.",
+        });
+      }
+      if (val.fileBase64 !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["fileBase64"],
+          message: "fileBase64 solo aplica a CSV/XLSX.",
+        });
+      }
+    }
+  });
 
 const idempotencyKeyHeader = z.object({
   "idempotency-key": z.string().trim().min(1).max(200).optional(),
@@ -93,9 +154,12 @@ const rowsQuery = z.object({
  *   post:
  *     summary: Crear un lote de importación de pacientes (capability patient:import)
  *     description: >
- *       Recibe filas estructuradas (JSON), las guarda en staging y encola el
- *       procesado (normalización + validación + deduplicación). Responde 202; el
- *       resultado se consulta por id. No escribe pacientes finales hasta el apply.
+ *       Recibe filas estructuradas en JSON (`rows`) o un archivo TABULAR CSV/XLSX
+ *       en base64 (`fileBase64`), las guarda en staging y encola el procesado
+ *       (normalización + validación + deduplicación). Responde 202; el resultado se
+ *       consulta por id. No escribe pacientes finales hasta el apply. CSV/XLSX se
+ *       parsean en el route (acotado) a la misma forma que el JSON; un archivo
+ *       ilegible falla el LOTE con 400. No hay OCR en esta fase.
  *     tags: [Public:PatientImports]
   *     security: [{ bearerAuth: [] }]
   *     parameters:
@@ -112,7 +176,6 @@ const rowsQuery = z.object({
  *         application/json:
  *           schema:
  *             type: object
- *             required: [rows]
  *             properties:
  *               source:
  *                 type: string
@@ -122,12 +185,23 @@ const rowsQuery = z.object({
  *                   (created_by). Default "api".
  *               contentType:
  *                 type: string
+ *                 enum:
+ *                   - application/json
+ *                   - text/csv
+ *                   - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
  *                 description: >
- *                   Solo "application/json" en esta fase (default). Otro valor
- *                   responde 400. CSV/XLSX llegarán en una fase posterior.
+ *                   Formato del payload (default "application/json"). Con JSON envía
+ *                   "rows"; con "text/csv" o XLSX envía "fileBase64". Otro valor
+ *                   responde 400.
  *               rows:
  *                 type: array
+ *                 description: Filas estructuradas (solo JSON). Excluyente con fileBase64.
  *                 items: { type: object }
+ *               fileBase64:
+ *                 type: string
+ *                 description: >
+ *                   Archivo CSV/XLSX TABULAR (primera fila = cabecera) en base64.
+ *                   Solo para CSV/XLSX. Excluyente con rows.
  *     responses:
  *       202: { description: Lote aceptado y encolado para procesar }
  *       400: { description: Datos inválidos }
@@ -145,8 +219,39 @@ patientImportsRouter.post(
     const parsedHeaders = idempotencyKeyHeader.safeParse(req.headers);
     if (!parsedHeaders.success) throw badRequest("Idempotency-Key inválido.");
     const headers = parsedHeaders.data;
+    const parsed = req.body as z.infer<typeof createSchema>;
+
+    // CSV/XLSX: el archivo (fileBase64) se materializa a `rows` aquí, en el route
+    // (parse ACOTADO, sin OCR), reutilizando todo el pipeline JSON. Un archivo
+    // ilegible/vacío falla el LOTE con 400 (error claro por-lote); los problemas
+    // de fila siguen resolviéndose por-fila en el worker. JSON pasa sin tocar.
+    let rows: RawPatientRow[];
+    if (parsed.fileBase64 !== undefined && parsed.contentType !== undefined) {
+      try {
+        rows = parseImportFile(parsed.contentType, parsed.fileBase64);
+      } catch (err) {
+        if (err instanceof ImportParseError) throw badRequest(err.message);
+        throw err;
+      }
+      // Las filas parseadas de CSV/XLSX deben respetar las MISMAS cotas que las del
+      // JSON (`z.array(rowSchema)` en `createSchema`). Reusamos el schema en vez de
+      // duplicar reglas: un campo excedido (p.ej. notes > 600) falla el LOTE con un
+      // 400 claro, igual que el JSON, en vez de colarse a staging.
+      const validatedRows = z.array(rowSchema).safeParse(rows);
+      if (!validatedRows.success) {
+        const issue = validatedRows.error.issues[0];
+        const where = issue ? issue.path.join(".") : "fila";
+        throw badRequest(`El archivo tiene filas que exceden los límites permitidos (${where}).`);
+      }
+      rows = validatedRows.data;
+    } else {
+      rows = parsed.rows ?? [];
+    }
+
     const body = {
-      ...(req.body as z.infer<typeof createSchema>),
+      source: parsed.source,
+      contentType: parsed.contentType,
+      rows,
       idempotencyKey: headers["idempotency-key"],
     };
     const created = await service.createImport(body, req.user?.id ?? null);

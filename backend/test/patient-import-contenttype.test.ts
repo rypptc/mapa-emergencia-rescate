@@ -1,7 +1,9 @@
 /**
- * Integración — C7: la fase 1 solo procesa JSON. Un `contentType` distinto de
- * "application/json" se rechaza con 400 (no se procesa el payload como JSON a
- * ciegas). "application/json" (o ausente) se acepta.
+ * Integración — validación de contentType. Fase 4: se admiten JSON, CSV y XLSX.
+ *
+ * - "application/json" (o ausente) con `rows` → 202.
+ * - "text/csv"/XLSX EXIGEN `fileBase64`; declararlos sin archivo → 400.
+ * - Un contentType fuera del set soportado → 400 (no se procesa a ciegas).
  *
  * Requiere el stack local arriba (docker compose up): DATABASE_URL + VALKEY_URL.
  */
@@ -21,14 +23,22 @@ beforeAll(async () => {
 
 const rows = [{ name: "Demo Anon", hospital: "Hospital Demo" }];
 
-describe("createImport — validación de contentType (C7)", () => {
-  it("rechaza un contentType no soportado con 400", async () => {
+describe("createImport — validación de contentType (Fase 4)", () => {
+  it("rechaza un contentType fuera del set soportado con 400", async () => {
+    const res = await request(app)
+      .post("/api/public/patient-imports")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ contentType: "application/pdf", rows });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("contentType");
+  });
+
+  it("rechaza text/csv sin fileBase64 con 400", async () => {
     const res = await request(app)
       .post("/api/public/patient-imports")
       .set("Authorization", `Bearer ${token}`)
       .send({ contentType: "text/csv", rows });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain("application/json");
   });
 
   it("acepta application/json (202)", async () => {
