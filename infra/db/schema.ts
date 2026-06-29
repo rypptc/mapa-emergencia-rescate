@@ -204,7 +204,9 @@ export const patientImports = pgTable(
     id: text("id").primaryKey(),
     // pending → queued → processing → processed → applying → applied | failed
     status: text("status").notNull().default("pending"),
-    // Etiqueta de la integración/origen del lote (no es PII).
+    // Etiqueta DECLARADA del origen del lote (no es PII, no es confiable, no es
+    // autoría). La declara el cliente; la autoría verificada es `created_by`. No
+    // usar para auth/dedup. Ver docs/rfcs/0006-procedencia-ingesta-pacientes.md.
     source: text("source").notNull().default("api"),
     // Formato del payload de entrada. Fase 1 = JSON estructurado. CSV/XLSX/OCR
     // quedan como metadato a futuro (no se procesan todavía).
@@ -217,7 +219,8 @@ export const patientImports = pgTable(
     duplicateRows: integer("duplicate_rows").notNull().default(0),
     reviewRows: integer("review_rows").notNull().default(0),
     appliedRows: integer("applied_rows").notNull().default(0),
-    // Procedencia: user.id que creó el lote (NULL = sistema). No es PII de paciente.
+    // AUTORÍA VERIFICADA: user.id que creó el lote, derivado de req.user en el
+    // route (NO del body) → no spoofeable. (NULL = sistema). No es PII de paciente.
     createdBy: text("created_by"),
     // Resumen de error legible (NUNCA stack traces ni PII).
     errorSummary: text("error_summary"),

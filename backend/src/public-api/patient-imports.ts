@@ -17,7 +17,7 @@
  * documento/cédula, las notas, el contacto ni los hashes — solo estado,
  * contadores y errores/avisos de revisión.
  */
-import { Router } from "express";
+import { Router, json } from "express";
 import { z } from "zod";
 import { asyncHandler, rateLimit, validate } from "@/middleware";
 import { requireCapability } from "@/middleware/auth";
@@ -27,6 +27,13 @@ import { enqueuePatientImport } from "@/lib/queues";
 import * as service from "@/services/patient-imports";
 
 export const patientImportsRouter = Router();
+
+// D2: el parser global del server es de 256kb; un lote de hasta 2000 filas no
+// cabe ahí. El POST de creación está en LARGE_BODY_POST_PATHS (server.ts) para
+// saltar el parser global, y monta este parser ampliado. 4mb cubre el caso
+// esperado de 2000 filas con holgura (rowSchema es passthrough, así que extras
+// arbitrarios podrían inflar más). Endpoint autenticado (no anónimo).
+const jsonLargeBatch = json({ limit: "4mb" });
 
 // Fila de entrada (fase 1: JSON estructurado). Cotas sanas; los campos abiertos
 // extra se conservan en el crudo. La identidad mínima (nombre + hospital
@@ -48,8 +55,25 @@ const rowSchema = z
   .passthrough();
 
 const createSchema = z.object({
+  // `source` = etiqueta DECLARADA del origen del lote (p.ej. "telegram",
+  // "archivo-hospital-x"). La declara el cliente y NO es confiable: nunca
+  // representa autoría ni se usa para auth/dedup. La autoría VERIFICADA es el
+  // usuario autenticado (`created_by`, derivado de req.user en el route + en el
+  // audit_log). El modelado rico de procedencia (canal + referencia por-fila)
+  // está propuesto en docs/rfcs/0006-procedencia-ingesta-pacientes.md (#151).
   source: z.string().trim().max(120).optional(),
-  contentType: z.string().trim().max(120).optional(),
+  // C7: fase 1 SOLO procesa JSON estructurado. Si el cliente declara otro
+  // contentType (p.ej. "text/csv"), lo rechazamos con 400 en vez de procesar el
+  // payload como JSON silenciosamente. Cuando entren CSV/XLSX (Fase 4) se amplía
+  // el set permitido.
+  contentType: z
+    .string()
+    .trim()
+    .max(120)
+    .optional()
+    .refine((v) => v === undefined || v === "application/json", {
+      message: 'Solo se admite contentType "application/json" en esta fase.',
+    }),
   rows: z.array(rowSchema).min(1, "Envía al menos una fila.").max(2000, "Máximo 2000 filas por lote."),
 });
 
@@ -78,8 +102,17 @@ const rowsQuery = z.object({
  *             type: object
  *             required: [rows]
  *             properties:
- *               source: { type: string }
- *               contentType: { type: string }
+ *               source:
+ *                 type: string
+ *                 description: >
+ *                   Etiqueta DECLARADA del origen del lote (no confiable, no es
+ *                   autoría). La autoría verificada es el usuario autenticado
+ *                   (created_by). Default "api".
+ *               contentType:
+ *                 type: string
+ *                 description: >
+ *                   Solo "application/json" en esta fase (default). Otro valor
+ *                   responde 400. CSV/XLSX llegarán en una fase posterior.
  *               rows:
  *                 type: array
  *                 items: { type: object }
@@ -94,6 +127,7 @@ patientImportsRouter.post(
   "/",
   rateLimit({ scope: "public:patient-import:create", limit: 30 }),
   requireCapability("patient:import"),
+  jsonLargeBatch, // parser 4mb (tras los gates: no parseamos 4mb para callers rechazados)
   validate({ body: createSchema }),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof createSchema>;
@@ -102,16 +136,20 @@ patientImportsRouter.post(
     try {
       jobId = await enqueuePatientImport({ importId: summary.id, mode: "process" });
     } catch {
+      // D4: no dejar el lote huérfano en `pending` sin job. Lo sellamos `failed`
+      // para que la API lo refleje y no quede colgado para siempre.
+      await service.markImportFailed(summary.id, "No se pudo encolar el procesamiento.");
       throw serviceUnavailable("No se pudo encolar la importación. Inténtalo de nuevo.");
     }
-    await service.setImportJob(summary.id, jobId);
+    // D4: marca queued (condicional: no pisa al worker si ya arrancó) + jobId.
+    await service.markImportQueued(summary.id, jobId);
     await writeAudit(req, {
       action: "patient-import.create",
       targetType: "patient-import",
       targetId: summary.id,
       metadata: { rows: summary.counts.total, source: summary.source },
     });
-    res.status(202).json({ import: { ...summary, jobId }, jobId });
+    res.status(202).json({ import: { ...summary, status: "queued", jobId }, jobId });
   }),
 );
 

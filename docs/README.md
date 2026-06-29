@@ -85,6 +85,8 @@ acción.
   · _propuesta_.
 - [0004 — Nodos efímeros (cluster-autoscaler) + split web/api](rfcs/0004-autoscaling-y-split-web-api.md)
   · _propuesta_.
+- [0006 — Procedencia en la ingesta de pacientes](rfcs/0006-procedencia-ingesta-pacientes.md)
+  · _propuesta_.
 
 ### ADRs
 
