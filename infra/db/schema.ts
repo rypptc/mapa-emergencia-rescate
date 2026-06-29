@@ -192,6 +192,90 @@ export const hospitalPatients = pgTable(
   ],
 );
 
+/* --------------------------------------------------------- patient_imports */
+// Staging para la importación autenticada de pacientes hospitalarios (#151).
+// Un `patient_imports` = un lote subido por una integración/admin; sus filas
+// (`patient_import_rows`) pasan por normalización → validación → deduplicación
+// en el worker ANTES de escribirse en `hospital_patients` (apply idempotente).
+// La cabecera lleva solo contadores + estado + procedencia (sin PII de paciente).
+export const patientImports = pgTable(
+  "patient_imports",
+  {
+    id: text("id").primaryKey(),
+    // pending → queued → processing → processed → applying → applied | failed
+    status: text("status").notNull().default("pending"),
+    // Etiqueta de la integración/origen del lote (no es PII).
+    source: text("source").notNull().default("api"),
+    // Formato del payload de entrada. Fase 1 = JSON estructurado. CSV/XLSX/OCR
+    // quedan como metadato a futuro (no se procesan todavía).
+    contentType: text("content_type").notNull().default("application/json"),
+    // jobId de BullMQ del último job (process/apply) para trazabilidad.
+    jobId: text("job_id"),
+    totalRows: integer("total_rows").notNull().default(0),
+    validRows: integer("valid_rows").notNull().default(0),
+    invalidRows: integer("invalid_rows").notNull().default(0),
+    duplicateRows: integer("duplicate_rows").notNull().default(0),
+    reviewRows: integer("review_rows").notNull().default(0),
+    appliedRows: integer("applied_rows").notNull().default(0),
+    // Procedencia: user.id que creó el lote (NULL = sistema). No es PII de paciente.
+    createdBy: text("created_by"),
+    // Resumen de error legible (NUNCA stack traces ni PII).
+    errorSummary: text("error_summary"),
+    createdAt: epochMs("created_at").notNull(),
+    processedAt: epochMs("processed_at"),
+    appliedAt: epochMs("applied_at"),
+    updatedAt: epochMs("updated_at").notNull(),
+  },
+  (t) => [index("idx_patient_imports_status").on(t.status, t.createdAt.desc())],
+);
+
+// Una fila staging por paciente del lote. Guarda el dato CRUDO (restringido, en
+// jsonb) + los campos normalizados + el resultado de validación/dedup. El dato
+// crudo y los campos sensibles (cédula/documento, notas, contacto) NUNCA se
+// exponen en respuestas públicas/de baja confianza — solo el estado y los
+// errores/avisos de revisión.
+export const patientImportRows = pgTable(
+  "patient_import_rows",
+  {
+    id: text("id").primaryKey(),
+    importId: text("import_id")
+      .notNull()
+      .references(() => patientImports.id, { onDelete: "cascade" }),
+    rowIndex: integer("row_index").notNull(),
+    // Texto crudo del hospital tal como vino en el input (para resolverlo).
+    sourceHospital: text("source_hospital").notNull().default(""),
+    // Hospital resuelto (FK lógica a hospitals.id; NULL = no resoluble todavía).
+    hospitalId: text("hospital_id"),
+    // Nombre normalizado (trim/colapso de espacios).
+    name: text("name").notNull().default(""),
+    // Clave de bloqueo para dedup: nombre en minúsculas, sin acentos ni signos.
+    normalizedKey: text("normalized_key").notNull().default(""),
+    age: integer("age"),
+    condition: text("condition"),
+    status: text("status"),
+    // Dato CRUDO de entrada + campos sensibles (documento/notas/contacto).
+    // RESTRINGIDO: no se serializa hacia respuestas públicas.
+    rawData: jsonb("raw_data").notNull().default({}),
+    validationErrors: jsonb("validation_errors").notNull().default([]),
+    validationWarnings: jsonb("validation_warnings").notNull().default([]),
+    // pending | unique | duplicate | needs_review
+    dedupStatus: text("dedup_status").notNull().default("pending"),
+    // Candidatos de duplicado (allowlist: patientId + name + reason). Sin PII extra.
+    dedupCandidates: jsonb("dedup_candidates").notNull().default([]),
+    confidence: doublePrecision("confidence").notNull().default(0),
+    // pending | valid | invalid | duplicate | needs_review | applied | skipped
+    rowStatus: text("row_status").notNull().default("pending"),
+    // hospital_patients.id final tras el apply (idempotencia: set = ya aplicada).
+    patientId: text("patient_id"),
+    createdAt: epochMs("created_at").notNull(),
+    updatedAt: epochMs("updated_at").notNull(),
+  },
+  (t) => [
+    index("idx_patient_import_rows_import").on(t.importId, t.rowIndex),
+    index("idx_patient_import_rows_status").on(t.importId, t.rowStatus),
+  ],
+);
+
 /* ------------------------------------------------------- hospital_supplies */
 export const hospitalSupplyStatuses = pgTable(
   "hospital_supply_statuses",

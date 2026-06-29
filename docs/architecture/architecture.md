@@ -92,6 +92,14 @@ con `mediaUrl()`.
   configuración del Deployment (`SYNC_SCHEDULERS=0`, `HUB_SCHEDULERS=0`).
 - El worker sigue disponible para jobs manuales como backfill de Neon,
   migración de fotos a R2 y trabajos encolados explícitamente.
+- La cola `patient-imports` procesa la importación autenticada de pacientes
+  hospitalarios (#151): la API `POST /api/public/patient-imports` (capacidad
+  `patient:import`) guarda el lote en staging (`patient_imports` +
+  `patient_import_rows`) y encola; el worker normaliza, valida y deduplica las
+  filas, y `POST .../{id}/apply` encola la escritura idempotente en
+  `hospital_patients` (solo filas válidas y únicas). El dato crudo y los campos
+  sensibles (documento, notas, contacto) viven en staging restringido y no se
+  exponen en las respuestas. OCR/ICR queda como metadato a futuro, sin proveedor.
 
 ## Despliegue
 

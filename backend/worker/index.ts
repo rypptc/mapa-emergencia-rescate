@@ -13,6 +13,7 @@ import {
   createMaintenanceWorker,
   registerMaintenanceSchedulers,
 } from "./maintenance.queue";
+import { createPatientImportsWorker } from "./patientImports.queue";
 import { recordDeadLetter, isExhausted } from "./deadletter";
 import { closePools } from "./db";
 
@@ -58,6 +59,21 @@ maintenanceWorker.on("completed", (job) =>
   console.log(`[maintenance] ${job.id} (${job.name}) completed`),
 );
 workers.push(maintenanceWorker);
+
+// Worker de importación de pacientes hospitalarios (#151): normaliza/valida/
+// deduplica el staging y aplica las filas válidas/únicas fuera del request path.
+const patientImportsWorker = createPatientImportsWorker();
+patientImportsWorker.on("failed", (job, err) => {
+  console.error(`[patient-imports] job ${job?.id} failed:`, err?.message || err);
+  if (isExhausted(job)) void recordDeadLetter("patient-imports", job, err, Date.now());
+});
+patientImportsWorker.on("error", (err) =>
+  console.error("[patient-imports] worker error:", err?.message || err),
+);
+patientImportsWorker.on("completed", (job, r) =>
+  console.log(`[patient-imports] ${job.id} ->`, JSON.stringify(r)),
+);
+workers.push(patientImportsWorker);
 
 console.log(`[worker] started ${workers.length} workers`);
 

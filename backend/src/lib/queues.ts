@@ -19,6 +19,7 @@ import { env } from "@/config/env";
 const PREFIX = env.QUEUE_PREFIX;
 const SOURCES_SYNC_QUEUE = "sources-sync";
 const MAINTENANCE_QUEUE = "maintenance";
+const PATIENT_IMPORTS_QUEUE = "patient-imports";
 const REMOVE_ON_COMPLETE = env.QUEUE_REMOVE_ON_COMPLETE;
 const REMOVE_ON_FAIL = env.QUEUE_REMOVE_ON_FAIL;
 
@@ -125,6 +126,41 @@ export async function enqueueDuplicatesReport(
     },
   );
   return job.id!;
+}
+
+/** Modo del job de importación de pacientes: procesar staging o aplicar al final. */
+export type PatientImportMode = "process" | "apply";
+
+export interface PatientImportJobData {
+  importId: string;
+  mode: PatientImportMode;
+  /** user.id que disparó el apply (auditoría/procedencia). Opcional. */
+  actorId?: string | null;
+}
+
+/**
+ * Encola el procesado o el apply de un lote de pacientes. jobId determinístico
+ * por (modo, importId): un re-disparo con un job pendiente del mismo modo es
+ * no-op (idempotencia). El payload es minúsculo (solo el id) — las filas viven
+ * en la DB de staging, no en el job. Devuelve el jobId para trazabilidad.
+ */
+export async function enqueuePatientImport(
+  data: PatientImportJobData,
+  opts?: JobsOptions,
+): Promise<string> {
+  const job = await queue(PATIENT_IMPORTS_QUEUE).add(`${data.mode}-${data.importId}`, data, {
+    jobId: `pimport-${data.mode}-${data.importId}`,
+    attempts: 3,
+    backoff: { type: "exponential", delay: 10_000 },
+    removeOnComplete: REMOVE_ON_COMPLETE,
+    removeOnFail: REMOVE_ON_FAIL,
+    ...opts,
+  });
+  return job.id!;
+}
+
+export function getPatientImportJobState(jobId: string): Promise<JobState | null> {
+  return jobState(PATIENT_IMPORTS_QUEUE, jobId);
 }
 
 async function jobState(queueName: string, jobId: string): Promise<JobState | null> {
