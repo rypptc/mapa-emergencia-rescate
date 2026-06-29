@@ -14,14 +14,10 @@
  * PII de notas).
  */
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db";
-import {
-  createPatient,
-  type PatientCondition,
-  type PatientStatus,
-} from "@/services/patients";
+import type { PatientCondition, PatientStatus } from "@/services/patients";
 import {
   classifyDedup,
   documentDigits,
@@ -33,6 +29,32 @@ import {
 } from "@/services/patient-import-logic";
 
 const { patientImports, patientImportRows, hospitalPatients, hospitals } = schema;
+
+const PATIENT_IMPORT_FAILED_STAGE = {
+  PROCESS: "process",
+  APPLY: "apply",
+} as const;
+
+type PatientImportFailedStage =
+  (typeof PATIENT_IMPORT_FAILED_STAGE)[keyof typeof PATIENT_IMPORT_FAILED_STAGE];
+
+const PATIENT_CONDITION = {
+  STABLE: "stable",
+  SERIOUS: "serious",
+  CRITICAL: "critical",
+  RECOVERING: "recovering",
+  UNKNOWN: "unknown",
+} as const;
+
+const PATIENT_STATUS = {
+  HOSPITALIZED: "hospitalized",
+  DISCHARGED: "discharged",
+  TRANSFERRED: "transferred",
+  DECEASED: "deceased",
+} as const;
+
+const PATIENT_CONDITIONS = new Set<string>(Object.values(PATIENT_CONDITION));
+const PATIENT_STATUSES = new Set<string>(Object.values(PATIENT_STATUS));
 
 /** Estados de cabecera del import. */
 export type ImportStatus =
@@ -51,6 +73,7 @@ export interface ImportSummaryDTO {
   source: string;
   contentType: string;
   jobId: string | null;
+  failedStage: PatientImportFailedStage | null;
   counts: {
     total: number;
     valid: number;
@@ -89,7 +112,12 @@ export interface ImportRowDTO {
 export interface CreateImportInput {
   source?: string;
   contentType?: string;
+  idempotencyKey?: string;
   rows: RawPatientRow[];
+}
+
+export interface CreateImportResult extends ImportSummaryDTO {
+  reusedExisting: boolean;
 }
 
 interface ImportHeaderRow {
@@ -98,6 +126,8 @@ interface ImportHeaderRow {
   source: string;
   contentType: string;
   jobId: string | null;
+  failedStage: string | null;
+  idempotencyKeyHash: string | null;
   totalRows: number;
   validRows: number;
   invalidRows: number;
@@ -119,6 +149,7 @@ function toSummary(h: ImportHeaderRow): ImportSummaryDTO {
     source: h.source,
     contentType: h.contentType,
     jobId: h.jobId,
+    failedStage: isFailedStage(h.failedStage) ? h.failedStage : null,
     counts: {
       total: h.totalRows,
       valid: h.validRows,
@@ -136,6 +167,95 @@ function toSummary(h: ImportHeaderRow): ImportSummaryDTO {
   };
 }
 
+function toCreateImportResult(
+  h: ImportHeaderRow,
+  reusedExisting: boolean,
+): CreateImportResult {
+  return { ...toSummary(h), reusedExisting };
+}
+
+function isFailedStage(value: string | null): value is PatientImportFailedStage {
+  return value === PATIENT_IMPORT_FAILED_STAGE.PROCESS || value === PATIENT_IMPORT_FAILED_STAGE.APPLY;
+}
+
+function hashIdempotencyKey(key: string | undefined): string | null {
+  const trimmed = key?.trim();
+  if (!trimmed) return null;
+  return createHash("sha256").update(trimmed).digest("hex");
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "code" in err && err.code === "23505";
+}
+
+function assertImportState(
+  header: ImportHeaderRow,
+  allowed: readonly ImportStatus[],
+  action: string,
+): void {
+  if (!allowed.includes(header.status as ImportStatus)) {
+    throw new Error(
+      `No se puede ${action} un lote en estado "${header.status}"; estados válidos: ${allowed.join(", ")}.`,
+    );
+  }
+}
+
+interface QueryRows<T> {
+  rows: T[];
+}
+
+async function lockHeaderForUpdate(
+  tx: Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0],
+  importId: string,
+): Promise<ImportHeaderRow | null> {
+  const result = (await tx.execute(sql`
+    select
+      id,
+      status,
+      source,
+      content_type as "contentType",
+      job_id as "jobId",
+      failed_stage as "failedStage",
+      idempotency_key_hash as "idempotencyKeyHash",
+      total_rows as "totalRows",
+      valid_rows as "validRows",
+      invalid_rows as "invalidRows",
+      duplicate_rows as "duplicateRows",
+      review_rows as "reviewRows",
+      applied_rows as "appliedRows",
+      created_by as "createdBy",
+      error_summary as "errorSummary",
+      created_at as "createdAt",
+      processed_at as "processedAt",
+      applied_at as "appliedAt",
+      updated_at as "updatedAt"
+    from patient_imports
+    where id = ${importId}
+    for update
+  `)) as unknown as QueryRows<ImportHeaderRow>;
+  return result.rows[0] ?? null;
+}
+
+async function transitionImportStatus(
+  importId: string,
+  allowed: readonly ImportStatus[],
+  nextStatus: ImportStatus,
+  action: string,
+): Promise<boolean> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const header = await lockHeaderForUpdate(tx, importId);
+    if (!header) throw new Error(`patient_import ${importId} no existe`);
+    if (header.status === nextStatus) return false;
+    assertImportState(header, allowed, action);
+    await tx
+      .update(patientImports)
+      .set({ status: nextStatus, failedStage: null, updatedAt: Date.now() })
+      .where(eq(patientImports.id, importId));
+    return true;
+  });
+}
+
 /**
  * Crea un lote en STAGING (cabecera + filas crudas) en estado `pending`. NO
  * procesa nada inline (el worker lo hace): devuelve la cabecera para que la API
@@ -144,37 +264,71 @@ function toSummary(h: ImportHeaderRow): ImportSummaryDTO {
 export async function createImport(
   input: CreateImportInput,
   actorId: string | null,
-): Promise<ImportSummaryDTO> {
+): Promise<CreateImportResult> {
   const db = getDb();
   const now = Date.now();
   const id = randomUUID();
+  const idempotencyKeyHash = hashIdempotencyKey(input.idempotencyKey);
 
-  await db.insert(patientImports).values({
-    id,
-    status: "pending",
-    source: (input.source ?? "api").slice(0, 120),
-    contentType: (input.contentType ?? "application/json").slice(0, 120),
-    totalRows: input.rows.length,
-    createdBy: actorId,
-    createdAt: now,
-    updatedAt: now,
-  });
+  if (idempotencyKeyHash && actorId) {
+    const existing = await db
+      .select()
+      .from(patientImports)
+      .where(
+        and(
+          eq(patientImports.createdBy, actorId),
+          eq(patientImports.idempotencyKeyHash, idempotencyKeyHash),
+        ),
+      )
+      .limit(1);
+    if (existing[0]) return toCreateImportResult(existing[0] as ImportHeaderRow, true);
+  }
 
-  if (input.rows.length > 0) {
-    await db.insert(patientImportRows).values(
-      input.rows.map((raw, i) => ({
-        id: randomUUID(),
-        importId: id,
-        rowIndex: i,
-        rawData: raw as Record<string, unknown>,
+  try {
+    await db.transaction(async (tx) => {
+      await tx.insert(patientImports).values({
+        id,
+        status: "pending",
+        source: (input.source ?? "api").slice(0, 120),
+        contentType: (input.contentType ?? "application/json").slice(0, 120),
+        idempotencyKeyHash,
+        totalRows: input.rows.length,
+        createdBy: actorId,
         createdAt: now,
         updatedAt: now,
-      })),
-    );
+      });
+
+      if (input.rows.length > 0) {
+        await tx.insert(patientImportRows).values(
+          input.rows.map((raw, i) => ({
+            id: randomUUID(),
+            importId: id,
+            rowIndex: i,
+            rawData: raw as Record<string, unknown>,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        );
+      }
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err) || !idempotencyKeyHash || !actorId) throw err;
+    const existing = await db
+      .select()
+      .from(patientImports)
+      .where(
+        and(
+          eq(patientImports.createdBy, actorId),
+          eq(patientImports.idempotencyKeyHash, idempotencyKeyHash),
+        ),
+      )
+      .limit(1);
+    if (existing[0]) return toCreateImportResult(existing[0] as ImportHeaderRow, true);
+    throw err;
   }
 
   const header = await loadHeader(id);
-  return toSummary(header!);
+  return toCreateImportResult(header!, false);
 }
 
 async function loadHeader(id: string): Promise<ImportHeaderRow | null> {
@@ -378,13 +532,13 @@ async function loadHospitalCandidates(
  */
 export async function processImport(importId: string): Promise<ImportSummaryDTO> {
   const db = getDb();
-  const header = await loadHeader(importId);
-  if (!header) throw new Error(`patient_import ${importId} no existe`);
-
-  await db
-    .update(patientImports)
-    .set({ status: "processing", updatedAt: Date.now() })
-    .where(eq(patientImports.id, importId));
+  const claimed = await transitionImportStatus(
+    importId,
+    ["pending", "queued", "processed"],
+    "processing",
+    "procesar",
+  );
+  if (!claimed) return (await getImport(importId))!;
 
   const rawRows = (await db
     .select({
@@ -505,6 +659,53 @@ interface ApplyableRow {
   hospitalId: string | null;
 }
 
+function normalizePatientCondition(value: string | null): PatientCondition {
+  return PATIENT_CONDITIONS.has(value ?? "")
+    ? (value as PatientCondition)
+    : PATIENT_CONDITION.UNKNOWN;
+}
+
+function normalizePatientStatus(value: string | null): PatientStatus {
+  return PATIENT_STATUSES.has(value ?? "")
+    ? (value as PatientStatus)
+    : PATIENT_STATUS.HOSPITALIZED;
+}
+
+async function applyOneRowAtomically(rowId: string): Promise<string | null> {
+  const db = getDb();
+  return db.transaction(async (tx) => {
+    const locked = (await tx.execute(sql`
+      select id, name, age, condition, status, hospital_id as "hospitalId"
+      from patient_import_rows
+      where id = ${rowId}
+        and row_status = 'valid'
+        and patient_id is null
+      for update
+    `)) as unknown as QueryRows<ApplyableRow>;
+    const row = locked.rows[0];
+    if (!row?.hospitalId || !row.name) return null;
+
+    const patientId = randomUUID();
+    const now = Date.now();
+    const name = row.name.trim().slice(0, 120);
+    const age = row.age === null || row.age === undefined ? null : Math.max(0, Math.trunc(Number(row.age)));
+    const condition = normalizePatientCondition(row.condition);
+    const status = normalizePatientStatus(row.status);
+
+    await tx.execute(sql`
+      insert into hospital_patients
+        (id, hospital_id, name, age, condition, status, notes, contact, admitted_at, updated_at)
+      values
+        (${patientId}, ${row.hospitalId}, ${name}, ${age}, ${condition}, ${status}, '', '', ${now}, ${now})
+    `);
+    await tx
+      .update(patientImportRows)
+      .set({ patientId, rowStatus: "applied", updatedAt: now })
+      .where(eq(patientImportRows.id, row.id));
+    return patientId;
+  });
+}
+
 /**
  * Aplica las filas `valid` (únicas) que aún no tienen paciente. Idempotente:
  * solo toma filas con `patient_id IS NULL`, así re-correr no duplica. Las filas
@@ -515,13 +716,21 @@ export async function applyImport(
   actorId: string | null,
 ): Promise<ImportSummaryDTO> {
   const db = getDb();
-  const header = await loadHeader(importId);
-  if (!header) throw new Error(`patient_import ${importId} no existe`);
-
-  await db
-    .update(patientImports)
-    .set({ status: "applying", updatedAt: Date.now() })
-    .where(eq(patientImports.id, importId));
+  const claimed = await db.transaction(async (tx) => {
+    const header = await lockHeaderForUpdate(tx, importId);
+    if (!header) throw new Error(`patient_import ${importId} no existe`);
+    if (header.status === "applying") return false;
+    assertImportState(header, ["processed", "applied", "failed"], "aplicar");
+    if (header.status === "failed" && header.failedStage !== PATIENT_IMPORT_FAILED_STAGE.APPLY) {
+      throw new Error('Solo se puede reanudar un lote fallido durante la etapa "apply".');
+    }
+    await tx
+      .update(patientImports)
+      .set({ status: "applying", failedStage: null, updatedAt: Date.now() })
+      .where(eq(patientImports.id, importId));
+    return true;
+  });
+  if (!claimed) return (await getImport(importId))!;
 
   const toApply = (await db
     .select({
@@ -543,31 +752,7 @@ export async function applyImport(
 
   const now = Date.now();
   for (const row of toApply) {
-    if (!row.hospitalId || !row.name) continue; // defensivo (no debería pasar en "valid")
-    const created = await createPatient({
-      hospitalId: row.hospitalId,
-      name: row.name,
-      age: row.age,
-      // El staging ya guardó valores canónicos del enum; createPatient los
-      // revalida igual (PATIENT_CONDITIONS/STATUSES.has) antes de escribir.
-      condition: (row.condition ?? undefined) as PatientCondition | undefined,
-      status: (row.status ?? undefined) as PatientStatus | undefined,
-      // A0 (privacidad) — MITIGACIÓN TEMPORAL, ver #117.
-      // El campo `notes` se expone hoy en la búsqueda pública de pacientes
-      // (publicSafe solo restringe el WHERE, no el DTO), así que una cédula o
-      // nota médica del input quedaría pública. Por eso la importación NO propaga
-      // notas crudas al paciente final. El crudo sigue confinado en `raw_data`
-      // (staging restringido).
-      // El fix de raíz es #117 (que el DTO público de pacientes no devuelva
-      // `notes` + guardrail), igual que `public_hospitalized_patients` en #71 de
-      // venezuela-ayuda. Cuando #117 aterrice, decidir si los pacientes
-      // importados conservan notas en un campo restringido en vez de vaciarlas.
-      notes: "",
-    });
-    await db
-      .update(patientImportRows)
-      .set({ patientId: created.id, rowStatus: "applied", updatedAt: now })
-      .where(eq(patientImportRows.id, row.id));
+    await applyOneRowAtomically(row.id);
   }
 
   // Recuenta aplicadas desde DB (refleja runs acumulados; idempotente).
@@ -593,11 +778,20 @@ export async function applyImport(
 }
 
 /** Marca el import como fallido con un resumen legible (sin PII ni stack). */
-export async function markImportFailed(importId: string, summary: string): Promise<void> {
+export async function markImportFailed(
+  importId: string,
+  summary: string,
+  failedStage?: PatientImportFailedStage,
+): Promise<void> {
   const db = getDb();
   await db
     .update(patientImports)
-    .set({ status: "failed", errorSummary: summary.slice(0, 500), updatedAt: Date.now() })
+    .set({
+      status: "failed",
+      failedStage: failedStage ?? null,
+      errorSummary: summary.slice(0, 500),
+      updatedAt: Date.now(),
+    })
     .where(eq(patientImports.id, importId));
 }
 

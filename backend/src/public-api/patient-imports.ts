@@ -77,6 +77,10 @@ const createSchema = z.object({
   rows: z.array(rowSchema).min(1, "Envía al menos una fila.").max(2000, "Máximo 2000 filas por lote."),
 });
 
+const idempotencyKeyHeader = z.object({
+  "idempotency-key": z.string().trim().min(1).max(200).optional(),
+});
+
 const idParams = z.object({ id: z.string().trim().min(1, "Falta el id.") });
 const rowsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -93,8 +97,16 @@ const rowsQuery = z.object({
  *       procesado (normalización + validación + deduplicación). Responde 202; el
  *       resultado se consulta por id. No escribe pacientes finales hasta el apply.
  *     tags: [Public:PatientImports]
- *     security: [{ bearerAuth: [] }]
- *     requestBody:
+  *     security: [{ bearerAuth: [] }]
+  *     parameters:
+  *       - name: Idempotency-Key
+  *         in: header
+  *         required: false
+  *         schema: { type: string, maxLength: 200 }
+  *         description: >
+  *           Clave de retry del cliente. Se guarda solo como hash SHA-256 y es
+  *           única por usuario autenticado; repetirla devuelve el mismo lote.
+  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
@@ -130,15 +142,26 @@ patientImportsRouter.post(
   jsonLargeBatch, // parser 4mb (tras los gates: no parseamos 4mb para callers rechazados)
   validate({ body: createSchema }),
   asyncHandler(async (req, res) => {
-    const body = req.body as z.infer<typeof createSchema>;
-    const summary = await service.createImport(body, req.user?.id ?? null);
+    const parsedHeaders = idempotencyKeyHeader.safeParse(req.headers);
+    if (!parsedHeaders.success) throw badRequest("Idempotency-Key inválido.");
+    const headers = parsedHeaders.data;
+    const body = {
+      ...(req.body as z.infer<typeof createSchema>),
+      idempotencyKey: headers["idempotency-key"],
+    };
+    const created = await service.createImport(body, req.user?.id ?? null);
+    const { reusedExisting, ...summary } = created;
+    if (reusedExisting) {
+      res.status(202).json({ import: summary, jobId: summary.jobId });
+      return;
+    }
     let jobId: string;
     try {
       jobId = await enqueuePatientImport({ importId: summary.id, mode: "process" });
     } catch {
       // D4: no dejar el lote huérfano en `pending` sin job. Lo sellamos `failed`
       // para que la API lo refleje y no quede colgado para siempre.
-      await service.markImportFailed(summary.id, "No se pudo encolar el procesamiento.");
+      await service.markImportFailed(summary.id, "No se pudo encolar el procesamiento.", "process");
       throw serviceUnavailable("No se pudo encolar la importación. Inténtalo de nuevo.");
     }
     // D4: marca queued (condicional: no pisa al worker si ya arrancó) + jobId.
@@ -225,8 +248,8 @@ patientImportsRouter.get(
  *     parameters:
  *       - { name: id, in: path, required: true, schema: { type: string } }
  *     responses:
- *       202: { description: Apply encolado }
- *       400: { description: El lote aún no está procesado }
+  *       202: { description: Apply encolado }
+  *       400: { description: El lote aún no está procesado o no es reanudable }
  *       404: { description: No encontrado }
  *       503: { description: No se pudo encolar (cola no disponible) }
  */
@@ -242,9 +265,12 @@ patientImportsRouter.post(
     // Solo se aplica un lote ya procesado (o re-aplicar uno ya aplicado, que es
     // idempotente). Bloquea estados intermedios para no escribir sobre staging
     // a medio evaluar.
-    if (!["processed", "applied"].includes(summary.status)) {
+    if (
+      !["processed", "applied"].includes(summary.status) &&
+      !(summary.status === "failed" && summary.failedStage === "apply")
+    ) {
       throw badRequest(
-        `El lote está en estado "${summary.status}"; debe estar "processed" para aplicar.`,
+        `El lote está en estado "${summary.status}"; debe estar "processed" o fallido en etapa "apply" para aplicar.`,
       );
     }
     let jobId: string;

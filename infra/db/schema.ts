@@ -204,6 +204,9 @@ export const patientImports = pgTable(
     id: text("id").primaryKey(),
     // pending → queued → processing → processed → applying → applied | failed
     status: text("status").notNull().default("pending"),
+    // Etapa que produjo `failed` (process|apply). Permite reanudar solo fallos de
+    // apply parcial sin re-aplicar staging posiblemente incompleto de process.
+    failedStage: text("failed_stage"),
     // Etiqueta DECLARADA del origen del lote (no es PII, no es confiable, no es
     // autoría). La declara el cliente; la autoría verificada es `created_by`. No
     // usar para auth/dedup. Ver docs/rfcs/0006-procedencia-ingesta-pacientes.md.
@@ -213,6 +216,9 @@ export const patientImports = pgTable(
     contentType: text("content_type").notNull().default("application/json"),
     // jobId de BullMQ del último job (process/apply) para trazabilidad.
     jobId: text("job_id"),
+    // Hash SHA-256 del header Idempotency-Key. No guardamos la key cruda; el
+    // índice único scoped evita duplicar lotes por retry del mismo usuario.
+    idempotencyKeyHash: text("idempotency_key_hash"),
     totalRows: integer("total_rows").notNull().default(0),
     validRows: integer("valid_rows").notNull().default(0),
     invalidRows: integer("invalid_rows").notNull().default(0),
@@ -229,7 +235,12 @@ export const patientImports = pgTable(
     appliedAt: epochMs("applied_at"),
     updatedAt: epochMs("updated_at").notNull(),
   },
-  (t) => [index("idx_patient_imports_status").on(t.status, t.createdAt.desc())],
+  (t) => [
+    index("idx_patient_imports_status").on(t.status, t.createdAt.desc()),
+    uniqueIndex("idx_patient_imports_actor_idempotency")
+      .on(t.createdBy, t.idempotencyKeyHash)
+      .where(sql`idempotency_key_hash IS NOT NULL`),
+  ],
 );
 
 // Una fila staging por paciente del lote. Guarda el dato CRUDO (restringido, en

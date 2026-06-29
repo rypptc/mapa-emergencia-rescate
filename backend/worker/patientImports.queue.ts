@@ -50,7 +50,9 @@ const processor: Processor = async (job) => {
     const maxAttempts = job.opts.attempts ?? 1;
     if (attemptsMade >= maxAttempts) {
       const msg = err instanceof Error ? err.message : "Error desconocido";
-      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`).catch(() => {});
+      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`, data.mode).catch(
+        () => {},
+      );
     }
     throw err;
   }

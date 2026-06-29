@@ -71,6 +71,13 @@
       "when": 1782705395837,
       "tag": "0009_productive_lightspeed",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782751107450,
+      "tag": "0010_zippy_zzzax",
+      "breakpoints": true
     }
   ]
 }
