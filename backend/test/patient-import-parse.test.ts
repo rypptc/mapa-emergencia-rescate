@@ -54,6 +54,16 @@ describe("parseDelimited (CSV)", () => {
     ]);
   });
 
+  it("detecta el delimitador tabulador (TSV de export hospitalario)", () => {
+    // `sniffDelimiter` también soporta `\t`: un export tabular pegado como TSV
+    // debe separarse por columnas, no quedar como una sola celda. Solo `,` y `;`
+    // estaban cubiertos; el camino del tabulador era código sin regresión.
+    expect(parseDelimited("a\tb\tc\n1\t2\t3")).toEqual([
+      ["a", "b", "c"],
+      ["1", "2", "3"],
+    ]);
+  });
+
   it("descarta el BOM y normaliza CRLF", () => {
     expect(parseDelimited("﻿a,b\r\n1,2\r\n")).toEqual([
       ["a", "b"],
@@ -175,6 +185,18 @@ describe("parseXlsxBuffer (XLSX mínimo)", () => {
     // sharedStrings escapa `&` como `&amp;`; el lector debe decodificarlo de vuelta
     // para no entregar la entidad cruda al pipeline.
     expect(parseXlsxBuffer(buildXlsxShared([["a & b", "c"]]))).toEqual([["a & b", "c"]]);
+  });
+
+  it("decodifica entidades XML numéricas del contenido (decimal y hex)", () => {
+    // Un XLSX real puede traer caracteres acentuados escapados como entidades
+    // numéricas (`&#233;` → "é", `&#xef;` → "ï"), no solo nombradas (`&amp;`). El
+    // lector debe decodificarlas o entregaría la entidad cruda al pipeline. Solo el
+    // camino nombrado estaba cubierto; el numérico era código sin regresión.
+    const buf = buildXlsxFromRows(
+      `<row r="1"><c r="A1" t="inlineStr"><is><t>caf&#233;</t></is></c>` +
+        `<c r="B1" t="inlineStr"><is><t>na&#xef;ve</t></is></c></row>`,
+    );
+    expect(parseXlsxBuffer(buf)).toEqual([["café", "naïve"]]);
   });
 
   it("rechaza bytes que no son un ZIP/XLSX válido", () => {
