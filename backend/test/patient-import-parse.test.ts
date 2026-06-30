@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   ImportParseError,
   MAX_IMPORT_ROWS,
+  isOcrPendingContentType,
   parseDelimited,
   parseImportFile,
   parseXlsxBuffer,
@@ -293,5 +294,47 @@ describe("parseImportFile", () => {
     expect(() =>
       parseImportFile(CONTENT_TYPE.CSV, Buffer.from(header + body).toString("base64")),
     ).toThrow(ImportParseError);
+  });
+});
+
+// --------------------------------------------------------------------------
+// isOcrPendingContentType (predicado OCR/ICR — imagen/PDF)
+// --------------------------------------------------------------------------
+
+describe("isOcrPendingContentType", () => {
+  it("reconoce application/pdf como OCR-pendiente", () => {
+    expect(isOcrPendingContentType("application/pdf")).toBe(true);
+  });
+
+  it("reconoce image/png como OCR-pendiente", () => {
+    expect(isOcrPendingContentType("image/png")).toBe(true);
+  });
+
+  it("reconoce image/jpeg como OCR-pendiente", () => {
+    expect(isOcrPendingContentType("image/jpeg")).toBe(true);
+  });
+
+  it("es case-insensitive (IMAGE/PNG)", () => {
+    expect(isOcrPendingContentType("IMAGE/PNG")).toBe(true);
+  });
+
+  it("ignora espacios alrededor (padded)", () => {
+    expect(isOcrPendingContentType("  application/pdf  ")).toBe(true);
+  });
+
+  it("NO marca text/csv", () => {
+    expect(isOcrPendingContentType("text/csv")).toBe(false);
+  });
+
+  it("NO marca application/json", () => {
+    expect(isOcrPendingContentType("application/json")).toBe(false);
+  });
+
+  it("NO marca el XLSX soportado", () => {
+    expect(isOcrPendingContentType(CONTENT_TYPE.XLSX)).toBe(false);
+  });
+
+  it("NO marca un tipo arbitrario no-OCR (application/zip)", () => {
+    expect(isOcrPendingContentType("application/zip")).toBe(false);
   });
 });

@@ -76,6 +76,18 @@ export type SupportedContentType = (typeof CONTENT_TYPE)[keyof typeof CONTENT_TY
 export const FILE_CONTENT_TYPES: ReadonlySet<string> = new Set([CONTENT_TYPE.CSV, CONTENT_TYPE.XLSX]);
 
 /**
+ * Tipos de contenido que requerirían OCR/ICR (imagen o PDF) para extraer datos.
+ * NO se procesan en esta fase: no hay motor de OCR configurado y el
+ * reconocimiento de manuscrito SIEMPRE exige revisión humana (#151/#158). Se
+ * reconocen explícitamente para responder un 501 claro en el route, en vez de
+ * un 400 genérico de "contentType no soportado".
+ */
+export function isOcrPendingContentType(contentType: string): boolean {
+  const ct = contentType.trim().toLowerCase();
+  return ct === "application/pdf" || ct.startsWith("image/");
+}
+
+/**
  * Error de parseo a NIVEL DE LOTE (archivo ilegible, vacío, demasiado grande o
  * con cabecera no mapeable). El route lo traduce a 400 con un mensaje claro. No
  * lleva PII ni stack del archivo.

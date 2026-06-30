@@ -4,6 +4,7 @@
  * - "application/json" (o ausente) con `rows` → 202.
  * - "text/csv"/XLSX EXIGEN `fileBase64`; declararlos sin archivo → 400.
  * - Un contentType fuera del set soportado → 400 (no se procesa a ciegas).
+ *   (imagen/PDF → OCR/ICR es 501, en su propia suite: patient-import-ocr.test.ts).
  *
  * Requiere el stack local arriba (docker compose up): DATABASE_URL + VALKEY_URL.
  */
@@ -28,7 +29,7 @@ describe("createImport — validación de contentType (Fase 4)", () => {
     const res = await request(app)
       .post("/api/public/patient-imports")
       .set("Authorization", `Bearer ${token}`)
-      .send({ contentType: "application/pdf", rows });
+      .send({ contentType: "application/zip", rows });
     expect(res.status).toBe(400);
     expect(res.body.error).toContain("contentType");
   });

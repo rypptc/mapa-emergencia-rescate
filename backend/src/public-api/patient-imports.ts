@@ -21,7 +21,7 @@ import { Router, json } from "express";
 import { z } from "zod";
 import { asyncHandler, rateLimit, validate } from "@/middleware";
 import { requireCapability } from "@/middleware/auth";
-import { notFound, badRequest, serviceUnavailable } from "@/lib/errors";
+import { notFound, badRequest, serviceUnavailable, notImplemented } from "@/lib/errors";
 import { writeAudit } from "@/auth/audit";
 import { enqueuePatientImport } from "@/lib/queues";
 import * as service from "@/services/patient-imports";
@@ -30,6 +30,7 @@ import {
   FILE_CONTENT_TYPES,
   ImportParseError,
   MAX_IMPORT_ROWS,
+  isOcrPendingContentType,
   parseImportFile,
 } from "@/services/patient-import-parse";
 import type { RawPatientRow } from "@/services/patient-import-logic";
@@ -89,7 +90,7 @@ const createSchema = z
       .trim()
       .max(120)
       .optional()
-      .refine((v) => v === undefined || SUPPORTED_CONTENT_TYPES.has(v), {
+      .refine((v) => v === undefined || SUPPORTED_CONTENT_TYPES.has(v) || isOcrPendingContentType(v), {
         message: 'contentType admitido: "application/json", "text/csv" o XLSX.',
       }),
     // JSON estructurado: filas directas (camino histórico, sin regresión).
@@ -103,6 +104,8 @@ const createSchema = z
     fileBase64: z.string().max(MAX_FILE_BASE64_LEN, "Archivo demasiado grande.").optional(),
   })
   .superRefine((val, ctx) => {
+    // OCR/ICR (imagen/PDF): no se valida rows/fileBase64 aquí; el route responde 501.
+    if (val.contentType !== undefined && isOcrPendingContentType(val.contentType)) return;
     const isFile = val.contentType !== undefined && FILE_CONTENT_TYPES.has(val.contentType);
     if (isFile) {
       if (!val.fileBase64) {
@@ -159,7 +162,8 @@ const rowsQuery = z.object({
  *       (normalización + validación + deduplicación). Responde 202; el resultado se
  *       consulta por id. No escribe pacientes finales hasta el apply. CSV/XLSX se
  *       parsean en el route (acotado) a la misma forma que el JSON; un archivo
- *       ilegible falla el LOTE con 400. No hay OCR en esta fase.
+ *       ilegible falla el LOTE con 400. No hay OCR en esta fase: una imagen o PDF
+ *       (OCR/ICR) NO está habilitado y se rechaza con 501; requiere revisión humana.
  *     tags: [Public:PatientImports]
   *     security: [{ bearerAuth: [] }]
   *     parameters:
@@ -207,6 +211,7 @@ const rowsQuery = z.object({
  *       400: { description: Datos inválidos }
  *       401: { description: No autenticado }
  *       403: { description: Sin capacidad patient:import }
+ *       501: { description: Imagen o PDF (OCR/ICR) no habilitado; requiere revisión humana }
  *       503: { description: No se pudo encolar (cola no disponible) }
  */
 patientImportsRouter.post(
@@ -220,6 +225,19 @@ patientImportsRouter.post(
     if (!parsedHeaders.success) throw badRequest("Idempotency-Key inválido.");
     const headers = parsedHeaders.data;
     const parsed = req.body as z.infer<typeof createSchema>;
+
+    // OCR/ICR (imagen/PDF) NO está habilitado: no hay motor de OCR configurado y el
+    // reconocimiento de imágenes/PDF y de texto MANUSCRITO exige SIEMPRE revisión
+    // humana (#151/#158). Se rechaza en el ingest, antes de decodificar/parsear/
+    // persistir nada: la entrada OCR/ICR no puede crear filas de staging, llegar a
+    // "valid"/listo ni auto-aplicarse. El cuerpo del 501 no refleja el dato crudo.
+    if (parsed.contentType !== undefined && isOcrPendingContentType(parsed.contentType)) {
+      throw notImplemented(
+        "Importación por OCR/ICR (imagen o PDF) no está habilitada: no hay motor de OCR configurado. " +
+          "El reconocimiento de imágenes/PDF y de texto manuscrito requiere revisión humana y se habilitará en una fase posterior. " +
+          "Por ahora envía datos tabulares: JSON (rows) o un archivo CSV/XLSX (fileBase64).",
+      );
+    }
 
     // CSV/XLSX: el archivo (fileBase64) se materializa a `rows` aquí, en el route
     // (parse ACOTADO, sin OCR), reutilizando todo el pipeline JSON. Un archivo
