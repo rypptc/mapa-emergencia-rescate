@@ -12,6 +12,7 @@
  * Requiere el stack local arriba (docker compose up): DATABASE_URL + VALKEY_URL.
  * Datos 100% sintéticos/anónimos — sin PII.
  */
+import { randomUUID } from "crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import "./helpers";
 import request from "supertest";
@@ -77,5 +78,54 @@ describe("createImport — frontera OCR/ICR (imagen/PDF) → 501", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ contentType: "application/json", rows });
     expect(res.status).toBe(202);
+  });
+
+  // El 501 anterior fija que la respuesta no filtra el crudo, pero NO observa el
+  // efecto en DB. Este caso cierra el hueco: la entrada OCR/ICR se rechaza ANTES
+  // de `service.createImport` y de `writeAudit` (ver route líneas 234-240), así
+  // que no puede dejar NINGÚN rastro persistido — ni fila de staging ni auditoría.
+  it("OCR/ICR (PDF) no crea fila en patient_imports ni entrada en audit_log", async () => {
+    // Usuario propio (createdBy aislado) → señal inequívoca: tras un 501 no debe
+    // existir ninguna fila atribuida a este actor. `source` sintético único añade
+    // una segunda señal independiente. Datos 100% demo, sin PII.
+    const { id: userId, token: ownToken } = await makeUserWithCaps(["patient:import"]);
+    const uniqueSource = `demo-ocr-no-persist-${randomUUID()}`;
+    const uniqueIdemKey = `demo-idem-${randomUUID()}`;
+
+    const res = await request(app)
+      .post("/api/public/patient-imports")
+      .set("Authorization", `Bearer ${ownToken}`)
+      .set("Idempotency-Key", uniqueIdemKey)
+      .send({ contentType: "application/pdf", source: uniqueSource, rows });
+    expect(res.status).toBe(501);
+
+    const { getDb, schema } = await import("@/db");
+    const { and, eq } = await import("drizzle-orm");
+    const db = getDb();
+
+    // Sin staging: ni por autoría verificada (createdBy) ni por la etiqueta source.
+    const importsByActor = await db
+      .select({ id: schema.patientImports.id })
+      .from(schema.patientImports)
+      .where(eq(schema.patientImports.createdBy, userId));
+    expect(importsByActor).toHaveLength(0);
+
+    const importsBySource = await db
+      .select({ id: schema.patientImports.id })
+      .from(schema.patientImports)
+      .where(eq(schema.patientImports.source, uniqueSource));
+    expect(importsBySource).toHaveLength(0);
+
+    // Sin auditoría: el 501 corta antes de writeAudit("patient-import.create").
+    const audits = await db
+      .select({ id: schema.auditLog.id })
+      .from(schema.auditLog)
+      .where(
+        and(
+          eq(schema.auditLog.actorUserId, userId),
+          eq(schema.auditLog.action, "patient-import.create"),
+        ),
+      );
+    expect(audits).toHaveLength(0);
   });
 });

@@ -99,7 +99,9 @@ con `mediaUrl()`.
   filas, y `POST .../{id}/apply` encola la escritura idempotente en
   `hospital_patients` (solo filas válidas y únicas). El dato crudo y los campos
   sensibles (documento, notas, contacto) viven en staging restringido y no se
-  exponen en las respuestas. OCR/ICR queda como metadato a futuro, sin proveedor.
+  exponen en las respuestas. La entrada OCR/ICR (imagen o PDF) se rechaza con 501
+  en el ingest hasta que exista motor de OCR configurado y contrato de revisión
+  humana; no crea staging ni pacientes automáticamente.
 
 ## Despliegue
 
