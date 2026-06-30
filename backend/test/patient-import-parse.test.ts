@@ -16,7 +16,12 @@ import {
   tableToRows,
   CONTENT_TYPE,
 } from "@/services/patient-import-parse";
-import { buildXlsxCorruptDeflate, buildXlsxInline, buildXlsxShared } from "./xlsx-fixture";
+import {
+  buildXlsxCorruptDeflate,
+  buildXlsxFromRows,
+  buildXlsxInline,
+  buildXlsxShared,
+} from "./xlsx-fixture";
 
 // --------------------------------------------------------------------------
 // CSV
@@ -138,6 +143,46 @@ describe("parseXlsxBuffer (XLSX mínimo)", () => {
 
   it("rechaza bytes que no son un ZIP/XLSX válido", () => {
     expect(() => parseXlsxBuffer(Buffer.from("no soy un xlsx"))).toThrow(ImportParseError);
+  });
+
+  it("rechaza una referencia de celda fuera de rango (DoS por columna dispersa)", () => {
+    // `ZZZZZ1` decodifica a un índice de columna enorme. Sin la cota, el lector
+    // crearía un array disperso gigante y lo materializaría (OOM). Debe fallar
+    // rápido a NIVEL DE LOTE sin intentar reservar la grilla.
+    const buf = buildXlsxFromRows(
+      `<row r="1"><c r="ZZZZZ1" t="inlineStr"><is><t>boom</t></is></c></row>`,
+    );
+    expect(() => parseXlsxBuffer(buf)).toThrow(ImportParseError);
+  });
+
+  it("acepta una columna alta pero válida (AB12)", () => {
+    // Columna AB (índice 27) está muy por debajo de la cota; debe parsear bien.
+    const buf = buildXlsxFromRows(
+      `<row r="12"><c r="AB12" t="inlineStr"><is><t>ok</t></is></c></row>`,
+    );
+    const grid = parseXlsxBuffer(buf);
+    expect(grid).toHaveLength(1);
+    expect(grid[0]![27]).toBe("ok");
+  });
+
+  it("falla en el parseo si excede el máximo de filas (no materializa toda la grilla)", () => {
+    const rowsXml = Array.from(
+      { length: MAX_IMPORT_ROWS + 2 },
+      (_, r) => `<row r="${r + 1}"><c r="A${r + 1}" t="inlineStr"><is><t>x</t></is></c></row>`,
+    ).join("");
+    expect(() => parseXlsxBuffer(buildXlsxFromRows(rowsXml))).toThrow(ImportParseError);
+  });
+
+  it("falla si excede el presupuesto de celdas (área filas × ancho, sin OOM)", () => {
+    // Cada fila lleva UNA celda en XFD (índice 16383, columna VÁLIDA < 16384), pero
+    // al rellenar huecos densifica `cells.length` a 16384. Pocas filas (~20) suman
+    // >200k slots: ni la cota de columna ni la de filas lo atrapan. Debe cortar a
+    // NIVEL DE LOTE por la cota de ÁREA total, sin materializar millones de slots.
+    const rowsXml = Array.from(
+      { length: 20 },
+      (_, r) => `<row r="${r + 1}"><c r="XFD${r + 1}" t="inlineStr"><is><t>x</t></is></c></row>`,
+    ).join("");
+    expect(() => parseXlsxBuffer(buildXlsxFromRows(rowsXml))).toThrow(ImportParseError);
   });
 
   it("remapea deflate corrupto a ImportParseError (no propaga error de zlib)", () => {

@@ -36,6 +36,33 @@ const XLSX_MAX_ENTRIES = 256;
 const XLSX_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 const XLSX_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Cota de columnas del lector XLSX: límite REAL de Excel (XFD = 16384 columnas).
+ * Una referencia de celda como `ZZZZZ1` decodifica a un índice de columna enorme;
+ * sin esta cota, `cells[col] = value` crea un array disperso gigante y el relleno
+ * posterior de huecos lo materializa entero (DoS por memoria) ANTES de cualquier
+ * tope por bytes/filas. Se valida ANTES de escribir la celda.
+ */
+const XLSX_MAX_COLS = 16384;
+
+/**
+ * Cota de filas del lector XLSX: cabecera + filas de datos. Espeja `MAX_IMPORT_ROWS`
+ * con una fila extra para la cabecera. Se valida MIENTRAS se parsea (no después de
+ * materializar toda la grilla), para acotar el trabajo en el request path.
+ */
+const XLSX_MAX_ROWS = MAX_IMPORT_ROWS + 1;
+
+/**
+ * Cota del ÁREA total materializada (filas × ancho). Las cotas de columna y de
+ * fila por separado no bastan: un input chico puede declarar muchas filas, cada
+ * una con UNA celda en una columna alta pero válida (p.ej. XFD = índice 16383).
+ * Cada fila densifica `cells.length` hasta esa columna al rellenar huecos, así
+ * que `XLSX_MAX_ROWS × XLSX_MAX_COLS` slots se materializan desde pocos bytes
+ * (amplificación DoS por memoria en el request path). Esta cota acota la suma de
+ * `cells.length` sobre todas las filas y falla el LOTE antes de esa explosión.
+ */
+const XLSX_MAX_CELLS = 200_000;
+
 /** Content-types soportados para creación de lotes. */
 export const CONTENT_TYPE = {
   JSON: "application/json",
@@ -323,6 +350,7 @@ function columnIndex(ref: string): number {
 
 function parseSheet(xml: string, shared: string[]): string[][] {
   const grid: string[][] = [];
+  let totalCells = 0;
   const rowRe = /<row\b[^>]*>([\s\S]*?)<\/row>/g;
   const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
   let rm: RegExpExecArray | null;
@@ -336,6 +364,11 @@ function parseSheet(xml: string, shared: string[]): string[][] {
       const body = cm[2] ?? "";
       const refMatch = /\br="([A-Za-z]+)\d+"/.exec(attrs);
       const col = refMatch ? columnIndex(refMatch[1]!) : autoCol;
+      // Cota de columna ANTES de tocar `cells[col]`: una ref tipo `ZZZZZ1` decodifica
+      // a un índice enorme y crearía un array disperso gigante (DoS por memoria).
+      if (col >= XLSX_MAX_COLS) {
+        throw new ImportParseError(`El XLSX excede el máximo de ${XLSX_MAX_COLS} columnas.`);
+      }
       autoCol = col + 1;
       const typeMatch = /\bt="([^"]+)"/.exec(attrs);
       const type = typeMatch ? typeMatch[1] : undefined;
@@ -359,6 +392,17 @@ function parseSheet(xml: string, shared: string[]): string[][] {
     // Rellena huecos (celdas vacías omitidas en el XML) con cadena vacía.
     for (let i = 0; i < cells.length; i++) if (cells[i] === undefined) cells[i] = "";
     grid.push(cells);
+    // Cota de filas MIENTRAS se parsea (no después de materializar toda la grilla).
+    if (grid.length > XLSX_MAX_ROWS) {
+      throw new ImportParseError(`El archivo excede el máximo de ${MAX_IMPORT_ROWS} filas.`);
+    }
+    // Cota del ÁREA total: acumula el ancho densificado de cada fila. Pocas filas
+    // con una celda en columna alta (válida) pueden materializar millones de slots;
+    // cortamos a NIVEL DE LOTE antes de esa amplificación de memoria.
+    totalCells += cells.length;
+    if (totalCells > XLSX_MAX_CELLS) {
+      throw new ImportParseError("El XLSX excede el máximo de celdas permitidas.");
+    }
   }
   return grid;
 }

@@ -124,6 +124,17 @@ export function buildXlsxCorruptDeflate(): Buffer {
   ]);
 }
 
+/**
+ * Construye un .xlsx envolviendo `<row>`s crudos en una sola hoja. Permite a los
+ * tests inyectar referencias de celda arbitrarias (p.ej. `ZZZZZ1` fuera de rango)
+ * o un número arbitrario de filas, para ejercitar las cotas del lector. Minimal:
+ * no genera sharedStrings; las celdas deben ser inline o numéricas.
+ */
+export function buildXlsxFromRows(rowsXml: string): Buffer {
+  const sheet = `<?xml version="1.0"?><worksheet><sheetData>${rowsXml}</sheetData></worksheet>`;
+  return buildZip([{ name: "xl/worksheets/sheet1.xml", data: Buffer.from(sheet, "utf8") }]);
+}
+
 /** Construye un .xlsx con inline strings (camino t="inlineStr"). */
 export function buildXlsxInline(grid: string[][]): Buffer {
   const rowsXml = grid
