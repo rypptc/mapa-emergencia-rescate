@@ -1008,11 +1008,17 @@ export async function applyImport(
   actorId: string | null,
 ): Promise<ImportSummaryDTO> {
   const db = getDb();
-  const claimed = await db.transaction(async (tx) => {
+  await db.transaction(async (tx) => {
     const header = await lockHeaderForUpdate(tx, importId);
     if (!header) throw new Error(`patient_import ${importId} no existe`);
-    if (header.status === "applying") return false;
-    assertImportState(header, ["processed", "applied", "failed"], "aplicar");
+    // P0/recuperación: "applying" es REANUDABLE. Si un intento previo murió a
+    // mitad, el retry del worker (mismo job BullMQ) debe retomar y terminar, en
+    // vez de salir sin hacer nada — eso dejaba el lote atascado en "applying" y
+    // el worker reportando éxito. Reentrar es seguro: applyOneRowAtomically usa
+    // SELECT … FOR UPDATE WHERE patient_id IS NULL, así que cada fila se aplica
+    // una sola vez aunque dos ejecuciones se solapen. El apply MANUAL paralelo lo
+    // bloquea el route (rechaza "applying"); aquí solo reentra el job reintentado.
+    assertImportState(header, ["processed", "applied", "failed", "applying"], "aplicar");
     if (header.status === "failed" && header.failedStage !== PATIENT_IMPORT_FAILED_STAGE.APPLY) {
       throw new Error('Solo se puede reanudar un lote fallido durante la etapa "apply".');
     }
@@ -1020,9 +1026,7 @@ export async function applyImport(
       .update(patientImports)
       .set({ status: "applying", failedStage: null, updatedAt: Date.now() })
       .where(eq(patientImports.id, importId));
-    return true;
   });
-  if (!claimed) return (await getImport(importId))!;
 
   const toApply = (await db
     .select({
