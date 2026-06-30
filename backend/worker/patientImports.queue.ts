@@ -11,6 +11,9 @@
  * Modos:
  *   - process: normaliza, valida y deduplica el staging del lote.
  *   - apply:   escribe las filas válidas y únicas en hospital_patients (idempotente).
+ *   - ocr:     extrae filas de una imagen (Minimax) y luego corre el process. El
+ *              `imageUrl` viaja SOLO en el payload del job (Redis), nunca se
+ *              persiste ni se expone; las filas OCR siempre quedan needs_review.
  */
 import { Worker, type Processor } from "bullmq";
 import { getRedis } from "./redis";
@@ -18,19 +21,20 @@ import { getRedis } from "./redis";
 const PREFIX = process.env.QUEUE_PREFIX || "mapa";
 export const PATIENT_IMPORTS_QUEUE = "patient-imports";
 
-type PatientImportMode = "process" | "apply";
+type PatientImportMode = "process" | "apply" | "ocr";
 
 interface PatientImportJobData {
   importId: string;
   mode: PatientImportMode;
   actorId?: string | null;
+  imageUrl?: string;
 }
 
 const processor: Processor = async (job) => {
   const data = job.data as PatientImportJobData;
   // Import relativo a src/ (mismo patrón que worker/sync/dedup.ts) para no
   // depender del resolutor de alias "@/" en el entrypoint del worker.
-  const { processImport, applyImport, markImportFailed } = await import(
+  const { processImport, applyImport, ingestOcrImport, markImportFailed } = await import(
     "../src/services/patient-imports"
   );
   try {
@@ -42,17 +46,26 @@ const processor: Processor = async (job) => {
       const r = await applyImport(data.importId, data.actorId ?? null);
       return { mode: "apply", importId: data.importId, counts: r.counts };
     }
+    if (data.mode === "ocr") {
+      // Config del proveedor desde env. `null` (sin MINIMAX_API_KEY) hace que
+      // ingestOcrImport lance: el lote se sella failed, sin filas válidas.
+      const { getMinimaxOcrConfig } = await import("../src/services/ocr/minimax-config");
+      const r = await ingestOcrImport(data.importId, data.imageUrl, {
+        config: getMinimaxOcrConfig(),
+      });
+      return { mode: "ocr", importId: data.importId, counts: r.counts };
+    }
     throw new Error(`patient-import modo desconocido: ${(data as { mode: string }).mode}`);
   } catch (err) {
     // En el último intento, sella el lote como fallido con un resumen legible
-    // (sin stack ni PII) para que la API lo refleje. BullMQ reintenta antes.
+    // (sin stack ni PII) para que la API lo refleje. BullMQ reintenta antes. El
+    // origen OCR se sella bajo la etapa "process" (no hay etapa "ocr" en el DTO).
     const attemptsMade = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts ?? 1;
     if (attemptsMade >= maxAttempts) {
       const msg = err instanceof Error ? err.message : "Error desconocido";
-      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`, data.mode).catch(
-        () => {},
-      );
+      const stage = data.mode === "apply" ? "apply" : "process";
+      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`, stage).catch(() => {});
     }
     throw err;
   }

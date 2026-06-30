@@ -128,14 +128,25 @@ export async function enqueueDuplicatesReport(
   return job.id!;
 }
 
-/** Modo del job de importación de pacientes: procesar staging o aplicar al final. */
-export type PatientImportMode = "process" | "apply";
+/**
+ * Modo del job de importación de pacientes:
+ *   - process: normaliza/valida/deduplica el staging ya materializado.
+ *   - apply:   escribe las filas válidas y únicas al final (idempotente).
+ *   - ocr:     extrae filas de una imagen (Minimax) y luego corre el process.
+ */
+export type PatientImportMode = "process" | "apply" | "ocr";
 
 export interface PatientImportJobData {
   importId: string;
   mode: PatientImportMode;
   /** user.id que disparó el apply (auditoría/procedencia). Opcional. */
   actorId?: string | null;
+  /**
+   * URL http/https de la imagen a extraer por OCR (modo "ocr"). Viaja SOLO en el
+   * payload del job (Redis), nunca se persiste en la DB de staging ni se expone en
+   * una respuesta de la API. Privacidad: el dato crudo no sale del worker.
+   */
+  imageUrl?: string;
 }
 
 /**

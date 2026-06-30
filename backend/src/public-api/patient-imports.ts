@@ -34,6 +34,7 @@ import {
   parseImportFile,
 } from "@/services/patient-import-parse";
 import type { RawPatientRow } from "@/services/patient-import-logic";
+import { getMinimaxOcrConfig } from "@/services/ocr/minimax-config";
 
 export const patientImportsRouter = Router();
 
@@ -74,6 +75,11 @@ const SUPPORTED_CONTENT_TYPES: ReadonlySet<string> = new Set([
   CONTENT_TYPE.XLSX,
 ]);
 
+/** ¿Es un contentType de imagen (image/*) — el único OCR cableado por URL? */
+function isImageContentType(contentType: string | undefined): boolean {
+  return contentType !== undefined && contentType.trim().toLowerCase().startsWith("image/");
+}
+
 const createSchema = z
   .object({
     // `source` = etiqueta DECLARADA del origen del lote (p.ej. "telegram",
@@ -102,9 +108,29 @@ const createSchema = z
     // CSV/XLSX: el archivo va en base64 (sin multipart). Se parsea a `rows` en el
     // route (acotado) ANTES de encolar; el trabajo pesado sigue en el worker.
     fileBase64: z.string().max(MAX_FILE_BASE64_LEN, "Archivo demasiado grande.").optional(),
+    // OCR/ICR de imagen: URL http/https ya resoluble de la imagen a extraer. NO se
+    // persiste ni se expone (viaja solo en el payload del job). Excluyente con
+    // rows/fileBase64 y SOLO válida con un contentType image/*.
+    imageUrl: z
+      .string()
+      .trim()
+      .max(2000)
+      .url("imageUrl debe ser una URL válida.")
+      .refine((v) => /^https?:\/\//i.test(v), { message: "imageUrl debe ser http o https." })
+      .optional(),
   })
   .superRefine((val, ctx) => {
-    // OCR/ICR (imagen/PDF): no se valida rows/fileBase64 aquí; el route responde 501.
+    // `imageUrl` solo pertenece al ingest OCR de imagen. En cualquier otro
+    // contentType es un campo fuera de lugar (no se procesa a ciegas).
+    if (val.imageUrl !== undefined && !isImageContentType(val.contentType)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["imageUrl"],
+        message: "imageUrl solo aplica a un contentType image/*.",
+      });
+    }
+    // OCR/ICR (imagen/PDF): no se valida rows/fileBase64 aquí; el route decide el
+    // status (202 imagen+imageUrl / 400 sin imageUrl / 501 PDF o sin proveedor).
     if (val.contentType !== undefined && isOcrPendingContentType(val.contentType)) return;
     const isFile = val.contentType !== undefined && FILE_CONTENT_TYPES.has(val.contentType);
     if (isFile) {
@@ -226,17 +252,71 @@ patientImportsRouter.post(
     const headers = parsedHeaders.data;
     const parsed = req.body as z.infer<typeof createSchema>;
 
-    // OCR/ICR (imagen/PDF) NO está habilitado: no hay motor de OCR configurado y el
-    // reconocimiento de imágenes/PDF y de texto MANUSCRITO exige SIEMPRE revisión
-    // humana (#151/#158). Se rechaza en el ingest, antes de decodificar/parsear/
-    // persistir nada: la entrada OCR/ICR no puede crear filas de staging, llegar a
-    // "valid"/listo ni auto-aplicarse. El cuerpo del 501 no refleja el dato crudo.
+    // OCR/ICR (imagen/PDF). Solo se cablea la IMAGEN por URL (image/* + imageUrl)
+    // cuando hay un proveedor configurado. PDF y raw/base64 siguen sin contrato de
+    // almacenamiento/recuperación y se rechazan con 501. La extracción real NO corre
+    // en el request path: se encola un job "ocr" y el dato crudo (imageUrl) viaja
+    // solo en el payload del job — nunca se persiste en staging ni se expone. Toda
+    // fila OCR queda en revisión humana obligatoria; nunca "valid" ni auto-apply.
     if (parsed.contentType !== undefined && isOcrPendingContentType(parsed.contentType)) {
-      throw notImplemented(
-        "Importación por OCR/ICR (imagen o PDF) no está habilitada: no hay motor de OCR configurado. " +
-          "El reconocimiento de imágenes/PDF y de texto manuscrito requiere revisión humana y se habilitará en una fase posterior. " +
-          "Por ahora envía datos tabulares: JSON (rows) o un archivo CSV/XLSX (fileBase64).",
+      const ocrConfig = getMinimaxOcrConfig();
+      const isImage = isImageContentType(parsed.contentType);
+
+      // Sin proveedor (no hay MINIMAX_API_KEY) o PDF (sin contrato de URL): 501. Se
+      // corta ANTES de createImport/writeAudit: no deja staging ni auditoría.
+      if (!ocrConfig || !isImage) {
+        throw notImplemented(
+          "Importación por OCR/ICR (imagen o PDF) no está habilitada: no hay motor de OCR configurado. " +
+            "El reconocimiento de imágenes/PDF y de texto manuscrito requiere revisión humana y se habilitará en una fase posterior. " +
+            "Por ahora envía datos tabulares: JSON (rows) o un archivo CSV/XLSX (fileBase64).",
+        );
+      }
+
+      // Imagen + proveedor habilitado: se EXIGE imageUrl http/https. OCR no acepta
+      // base64 ni rows (necesitan un contrato de almacenamiento aún no definido).
+      if (!parsed.imageUrl) {
+        throw badRequest(
+          "Para OCR/ICR de imagen envía imageUrl (http/https). No se aceptan fileBase64 ni rows.",
+        );
+      }
+
+      // Lote OCR: se crea SIN filas (las extrae el worker). El imageUrl NO se pasa a
+      // createImport: no se persiste. Reusa la idempotencia por Idempotency-Key.
+      const createdOcr = await service.createImport(
+        {
+          source: parsed.source,
+          contentType: parsed.contentType,
+          rows: [],
+          idempotencyKey: headers["idempotency-key"],
+        },
+        req.user?.id ?? null,
       );
+      const { reusedExisting: reusedOcr, ...ocrSummary } = createdOcr;
+      if (reusedOcr) {
+        res.status(202).json({ import: ocrSummary, jobId: ocrSummary.jobId });
+        return;
+      }
+      let ocrJobId: string;
+      try {
+        ocrJobId = await enqueuePatientImport({
+          importId: ocrSummary.id,
+          mode: "ocr",
+          imageUrl: parsed.imageUrl,
+        });
+      } catch {
+        await service.markImportFailed(ocrSummary.id, "No se pudo encolar el OCR.", "process");
+        throw serviceUnavailable("No se pudo encolar la importación. Inténtalo de nuevo.");
+      }
+      await service.markImportQueued(ocrSummary.id, ocrJobId);
+      // Auditoría sin PII: NUNCA el imageUrl. Solo estado/origen del lote.
+      await writeAudit(req, {
+        action: "patient-import.create",
+        targetType: "patient-import",
+        targetId: ocrSummary.id,
+        metadata: { rows: 0, source: ocrSummary.source, mode: "ocr" },
+      });
+      res.status(202).json({ import: { ...ocrSummary, status: "queued", jobId: ocrJobId }, jobId: ocrJobId });
+      return;
     }
 
     // CSV/XLSX: el archivo (fileBase64) se materializa a `rows` aquí, en el route

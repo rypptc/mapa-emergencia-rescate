@@ -30,6 +30,12 @@ import {
   type NormalizedRow,
   type RawPatientRow,
 } from "@/services/patient-import-logic";
+import type { MinimaxOcrConfig } from "@/services/ocr/minimax-config";
+import {
+  extractPatientRowsFromImageUrl,
+  OCR_REVIEW_WARNING,
+  type OcrExtractionResult,
+} from "@/services/ocr/minimax-provider";
 
 const { patientImports, patientImportRows, hospitalPatients, hospitals } = schema;
 
@@ -647,11 +653,28 @@ function mergeCandidatesUnique(...lists: DedupCandidate[][]): DedupCandidate[] {
 }
 
 /**
+ * Opciones de `processImport`.
+ *
+ * `forceReview` es la INVARIANTE de seguridad del origen OCR/ICR (#151/#158): un
+ * lote extraído por OCR JAMÁS puede quedar "valid" ni auto-aplicarse, aunque sus
+ * campos parezcan completos y el hospital resuelva. Con `forceReview`, TODA fila
+ * se marca `needs_review` (saltando la clasificación normal de validez/dedup) y se
+ * le anexa `reviewWarning`. El apply (que solo toma "valid") nunca escribe nada.
+ */
+export interface ProcessImportOptions {
+  forceReview?: boolean;
+  reviewWarning?: string;
+}
+
+/**
  * Procesa un lote: normaliza/valida/deduplica cada fila y actualiza contadores.
  * Idempotente: re-correr re-evalúa el staging desde el crudo (no escribe
  * pacientes). Lo invoca el worker.
  */
-export async function processImport(importId: string): Promise<ImportSummaryDTO> {
+export async function processImport(
+  importId: string,
+  opts: ProcessImportOptions = {},
+): Promise<ImportSummaryDTO> {
   const db = getDb();
   const claimed = await transitionImportStatus(
     importId,
@@ -709,7 +732,16 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
     let confidence = 0;
     let candidates: DedupCandidate[] = [];
 
-    if (errors.length > 0) {
+    if (opts.forceReview) {
+      // Origen OCR/ICR: NUNCA "valid", NUNCA auto-apply. Toda fila va a revisión
+      // humana obligatoria, saltando la clasificación de validez/dedup (no se
+      // registra como candidata del lote: no debe deduplicar a las siguientes).
+      rowStatus = "needs_review";
+      dedupStatus = "needs_review";
+      review++;
+      const warning = opts.reviewWarning ?? OCR_REVIEW_WARNING;
+      if (!warnings.includes(warning)) warnings.push(warning);
+    } else if (errors.length > 0) {
       rowStatus = "invalid";
       invalid++;
     } else if (hospitalUnresolved) {
@@ -807,6 +839,82 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
     .where(eq(patientImports.id, importId));
 
   return (await getImport(importId))!;
+}
+
+// --------------------------------------------------------------------------
+// Ingest OCR/ICR (lo corre el worker): extrae filas de una imagen y procesa.
+// --------------------------------------------------------------------------
+
+/**
+ * Dependencias inyectables del ingest OCR. `extract` se inyecta en tests para no
+ * tocar la red ni depender de `MINIMAX_API_KEY`; en producción se omite y se usa
+ * el proveedor real (`extractPatientRowsFromImageUrl`) con la `config` resuelta.
+ */
+export interface OcrIngestDeps {
+  /** Config del proveedor; `null` => OCR deshabilitado (lanza, no persiste nada). */
+  config: MinimaxOcrConfig | null;
+  /** Extractor inyectable (tests). Por defecto llama al proveedor real. */
+  extract?: () => Promise<OcrExtractionResult>;
+}
+
+/**
+ * Extrae las filas de una imagen por OCR/ICR (Minimax) y las materializa en el
+ * staging del lote, luego corre `processImport` con `forceReview` (#151/#158).
+ *
+ * INVARIANTE: el lote OCR nunca queda "valid" ni se auto-aplica — toda fila va a
+ * revisión humana con `OCR_REVIEW_WARNING`. El `imageUrl` NO se persiste ni se
+ * expone: solo se usa aquí para llamar al proveedor.
+ *
+ * Idempotente: reintentar el job re-extrae y REEMPLAZA las filas (no duplica). Si
+ * falta la config (proveedor deshabilitado) o el `imageUrl`, lanza — el worker lo
+ * sella `failed` en el último intento, sin dejar filas válidas.
+ */
+export async function ingestOcrImport(
+  importId: string,
+  imageUrl: string | undefined,
+  deps: OcrIngestDeps,
+): Promise<ImportSummaryDTO> {
+  const config = deps.config;
+  if (!config) {
+    throw new Error("OCR/ICR no está habilitado: falta la configuración del proveedor.");
+  }
+  const url = (imageUrl ?? "").trim();
+  if (!url) {
+    throw new Error("ingestOcrImport requiere un imageUrl http/https.");
+  }
+
+  const extract = deps.extract ?? (() => extractPatientRowsFromImageUrl(config, url));
+  const result = await extract();
+
+  // Reemplazo idempotente del staging: borra las filas previas e inserta las
+  // recién extraídas. Vuelve la cabecera a `pending` para que `processImport`
+  // (que admite pending/queued/processed) reclame y re-evalúe el lote completo.
+  const db = getDb();
+  const now = Date.now();
+  await db.transaction(async (tx) => {
+    await tx.delete(patientImportRows).where(eq(patientImportRows.importId, importId));
+    if (result.rows.length > 0) {
+      await tx.insert(patientImportRows).values(
+        result.rows.map((raw, i) => ({
+          id: randomUUID(),
+          importId,
+          rowIndex: i,
+          rawData: raw as Record<string, unknown>,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      );
+    }
+    await tx
+      .update(patientImports)
+      .set({ totalRows: result.rows.length, status: "pending", updatedAt: now })
+      .where(eq(patientImports.id, importId));
+  });
+
+  return processImport(importId, {
+    forceReview: true,
+    reviewWarning: result.warnings[0] ?? OCR_REVIEW_WARNING,
+  });
 }
 
 // --------------------------------------------------------------------------
