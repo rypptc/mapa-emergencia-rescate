@@ -68,6 +68,19 @@ const schema = z.object({
   // Proxy de analítica OpenPanel (route op/[...op]). Opcionales.
   OPENPANEL_API_URL: z.string().default("https://api.openpanel.dev"),
   OPENPANEL_CLIENT_SECRET: z.string().optional(),
+
+  // OCR/ICR de importación de pacientes (Minimax VL, OpenAI-compatible).
+  // DESACTIVADO por defecto: sin MINIMAX_API_KEY el proveedor no se construye y
+  // el ingest OCR/ICR sigue respondiendo 501 (sin habilitar auto-aplicación). El
+  // token es SOLO server-side: nunca se loguea ni se expone en respuestas. El
+  // endpoint, el modelo (VL), el prompt, el máximo de tokens y el timeout son
+  // parametrizables para cambiar de modelo sin redeploy.
+  MINIMAX_API_KEY: z.string().optional(),
+  MINIMAX_OCR_BASE_URL: z.string().default("https://api.minimax.io/v1"),
+  MINIMAX_OCR_MODEL: z.string().default("MiniMax-M3"),
+  MINIMAX_OCR_MAX_TOKENS: z.coerce.number().int().positive().default(2048),
+  MINIMAX_OCR_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  MINIMAX_OCR_PROMPT: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

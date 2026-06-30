@@ -94,6 +94,11 @@ services:
       COOKIE_SECURE: "false" # http local; en prod va a true (validado por env)
       APP_BASE_URL: http://localhost:3000
       # SMTP sin setear en local → el invite devuelve el link en la respuesta.
+      # OCR/ICR (Minimax VL) DESACTIVADO en local por defecto: sin MINIMAX_API_KEY
+      # el proveedor no se construye y el ingest OCR/ICR responde 501. Para probarlo
+      # localmente, exporta MINIMAX_API_KEY en tu entorno (NUNCA commitees el token):
+      # MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      # MINIMAX_OCR_MODEL: ${MINIMAX_OCR_MODEL:-MiniMax-M3}
     ports:
       - "8080:8080"
     depends_on:
