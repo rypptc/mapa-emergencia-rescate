@@ -33,7 +33,10 @@ resource "hcloud_server" "postgres" {
     prevent_destroy = true
     # cloud-init only runs on first boot; don't replace the server if the
     # rendered user_data changes later.
-    ignore_changes = [user_data]
+    # ssh_keys: Hetzner aplica llaves SOLO al crear (sus docs). Cambiar la lista
+    # en este server VIVO forzaría destruir+recrear -> perdería la DB. Se ignora;
+    # las llaves del server vivo se gestionan vía authorized_keys, no aquí.
+    ignore_changes = [user_data, ssh_keys]
   }
 }
 

@@ -24,6 +24,8 @@ resource "hcloud_server" "valkey" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [user_data]
+    # ssh_keys: Hetzner aplica llaves solo al crear; cambiarlas en el server vivo
+    # forzaría recrearlo. Se ignora (se gestionan vía authorized_keys).
+    ignore_changes = [user_data, ssh_keys]
   }
 }

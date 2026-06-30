@@ -9,6 +9,18 @@ variable "ssh_public_key" {
   type        = string
 }
 
+# Clave SSH "break-glass" (de respaldo): se guarda OFFLINE (no en .env del laptop
+# ni en GitHub secrets) y solo se usa si la clave ops se filtra, para entrar al
+# master y revocar la comprometida sin quedar bloqueado. Va en el master (root SSH
+# -> kubectl admin vía /etc/rancher/k3s/k3s.yaml). OPCIONAL: "" la desactiva.
+# Solo aplica a masters CREADOS tras el apply; el master vivo necesita un append
+# manual una vez (Hetzner instala llaves solo en el primer boot).
+variable "user_ssh_key" {
+  description = "Break-glass SSH public key (offline). Vacío = desactivada."
+  type        = string
+  default     = ""
+}
+
 variable "location" {
   description = "Hetzner location for the stateful servers."
   type        = string

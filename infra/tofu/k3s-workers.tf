@@ -35,6 +35,7 @@ resource "hcloud_server" "k3s_worker" {
   depends_on = [hcloud_server.k3s_master]
 
   lifecycle {
-    ignore_changes = [user_data]
+    # ssh_keys: create-only en Hetzner; ignorar para no recrear workers vivos.
+    ignore_changes = [user_data, ssh_keys]
   }
 }
