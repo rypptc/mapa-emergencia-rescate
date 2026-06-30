@@ -100,6 +100,25 @@ describe("tableToRows — mapeo de cabecera por alias", () => {
     });
   });
 
+  it("mapea cabeceras en español CON acentos (Condición/Teléfono/Cédula/Observaciones)", () => {
+    // Caso real: los archivos de hospital traen cabeceras acentuadas. `headerKey`
+    // baja a minúsculas y quita acentos ANTES de buscar el alias, así "Condición"
+    // colapsa a "condicion" → "condition", etc. Sin esto, un CSV/XLSX real perdería
+    // estas columnas al pasarlas como encabezado crudo en vez de al campo canónico.
+    const rows = tableToRows([
+      ["Nombre", "Hospital", "Condición", "Teléfono", "Cédula", "Observaciones"],
+      ["Demo Cuatro", "Hospital Demo", "estable", "n/a", "0001-X", "obs demo"],
+    ]);
+    expect(rows[0]).toEqual({
+      name: "Demo Cuatro",
+      hospital: "Hospital Demo",
+      condition: "estable",
+      contact: "n/a",
+      documentId: "0001-X",
+      notes: "obs demo",
+    });
+  });
+
   it("conserva columnas desconocidas bajo su encabezado crudo (passthrough)", () => {
     const rows = tableToRows([
       ["name", "hospital", "triage"],
@@ -139,6 +158,23 @@ describe("parseXlsxBuffer (XLSX mínimo)", () => {
 
   it("lee celdas inline (t=\"inlineStr\")", () => {
     expect(parseXlsxBuffer(buildXlsxInline(grid))).toEqual(grid);
+  });
+
+  it("lee celdas numéricas (<v> sin t=\"s\"/inlineStr): la edad va como número en Excel", () => {
+    // Un XLSX real guarda la edad como celda NUMÉRICA: `<c><v>45</v></c>` sin
+    // atributo `t`. El lector debe tomar el `<v>` crudo (no es índice de
+    // sharedStrings). Las fixtures de string no ejercitan este camino.
+    const buf = buildXlsxFromRows(
+      `<row r="1"><c r="A1" t="inlineStr"><is><t>age</t></is></c></row>` +
+        `<row r="2"><c r="A2"><v>45</v></c></row>`,
+    );
+    expect(parseXlsxBuffer(buf)).toEqual([["age"], ["45"]]);
+  });
+
+  it("decodifica entidades XML del contenido de las celdas (& embebido)", () => {
+    // sharedStrings escapa `&` como `&amp;`; el lector debe decodificarlo de vuelta
+    // para no entregar la entidad cruda al pipeline.
+    expect(parseXlsxBuffer(buildXlsxShared([["a & b", "c"]]))).toEqual([["a & b", "c"]]);
   });
 
   it("rechaza bytes que no son un ZIP/XLSX válido", () => {
