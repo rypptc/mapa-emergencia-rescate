@@ -22,6 +22,26 @@ export interface EmergencyReport {
   createdAt: number;
 }
 
+/** Sismo del catálogo USGS (Venezuela). Espeja el EarthquakeDTO del backend
+ * (GET /api/earthquakes). Solo campos públicos; nada de internals USGS. */
+export interface Earthquake {
+  id: string;
+  /** Magnitud (puede ser null si USGS aún no la calculó). */
+  magnitude: number | null;
+  place: string;
+  lat: number;
+  lng: number;
+  /** Profundidad en km, o null. */
+  depthKm: number | null;
+  /** Nivel PAGER del USGS (green|yellow|orange|red) o null. */
+  alert: string | null;
+  tsunami: boolean;
+  /** Significancia USGS 0–1000, o null. */
+  sig: number | null;
+  /** Momento del sismo (epoch-ms). */
+  occurredAt: number;
+}
+
 export type NewReport = Omit<
   EmergencyReport,
   "id" | "createdAt" | "photoUrl" | "confirmations"

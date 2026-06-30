@@ -38,6 +38,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# `.env*` NO captura `.staging.env` (el punto va antes de "env"): ignorar explícito.
+.staging.env
+*.staging.env
 
 # vercel
 .vercel

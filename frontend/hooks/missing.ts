@@ -74,16 +74,49 @@ function buildMissingUrl(p: MissingListParams): string {
   return `/api/missing?${sp.toString()}`;
 }
 
+/** queryFn compartido por la query y el prefetch (misma forma → misma entrada
+ *  de caché). */
+const fetchMissingPage =
+  (params: MissingListParams) =>
+  ({ signal }: { signal?: AbortSignal }) =>
+    apiGet<MissingListResponse>(buildMissingUrl(params), signal);
+
+// Una página se considera fresca 30s: paginar adelante/atrás NO la re-pide por
+// red (se sirve de caché al instante); el refetchInterval mantiene la vista viva
+// igual. Sin esto (staleTime global 5s) volver a una página tras 5s la refrescaba.
+const MISSING_LIST_STALE_MS = 30_000;
+
 /** Lista paginada de personas (polleada). Dedup: dos componentes con los MISMOS
  *  params comparten un solo request (mismo queryKey). */
 export function useMissingList(params: MissingListParams, pollMs = 8000) {
   return useQuery({
     queryKey: qk.missing.list(params),
-    queryFn: ({ signal }) => apiGet<MissingListResponse>(buildMissingUrl(params), signal),
+    queryFn: fetchMissingPage(params),
     refetchInterval: pollMs,
+    staleTime: MISSING_LIST_STALE_MS,
     // keepPreviousData-like: no parpadear al cambiar de página.
     placeholderData: (prev) => prev,
   });
+}
+
+/** Prefetch de páginas vecinas para que paginar sea instantáneo (patrón
+ *  recomendado de TanStack: placeholderData + prefetch del siguiente). Devuelve
+ *  una fn que el componente llama cuando cambia de página/filtro. No-op si la
+ *  página destino está fuera de rango. */
+export function usePrefetchMissingPages() {
+  const qc = useQueryClient();
+  return (params: MissingListParams, totalPages: number) => {
+    // Siguiente y anterior: cubre el caso típico de avanzar y el de retroceder.
+    for (const page of [params.page + 1, params.page - 1]) {
+      if (page < 1 || page > totalPages) continue;
+      const p = { ...params, page };
+      qc.prefetchQuery({
+        queryKey: qk.missing.list(p),
+        queryFn: fetchMissingPage(p),
+        staleTime: MISSING_LIST_STALE_MS,
+      });
+    }
+  };
 }
 
 /** Stats compartidas (reemplaza el poller de found-count redundante del carousel). */

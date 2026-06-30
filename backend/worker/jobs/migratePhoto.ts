@@ -15,7 +15,7 @@
  * (WHERE photo_migrated_at IS NULL) que es atómico y resuelve cualquier carrera.
  */
 import { targetPool } from "../db";
-import { putObject, publicUrl, objectExists, parseDataUri } from "../r2";
+import { putObject, publicUrl, objectExists, parseDataUri, withPrefix } from "../r2";
 
 export type PhotoTable = "missing_persons" | "reports";
 
@@ -126,7 +126,7 @@ export async function migratePhoto(
   }
 
   // 3) Subir a R2 (idempotente por key) — también fuera de cualquier txn.
-  const key = `images/${table}/${id}.${ext}`;
+  const key = withPrefix(`images/${table}/${id}.${ext}`);
   const url = (await objectExists(key))
     ? publicUrl(key)
     : await putObject(key, bytes, contentType);

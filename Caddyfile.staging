@@ -1,0 +1,37 @@
+# Caddy para STAGING — TLS automático (Let's Encrypt) + enrutado por dominio.
+# Caddy resuelve los nombres de servicio por la red interna de docker compose.
+# Espeja el Caddyfile de boahaus (mismo patrón: email ACME + reverse_proxy).
+#
+# Apunta estos dominios (A/AAAA) al VPS de staging antes de levantar el stack:
+#   staging.terremotovenezuela.app        -> frontend
+#   api-staging.terremotovenezuela.app    -> backend
+#   admin-staging.terremotovenezuela.app  -> admin
+
+{
+	email oaba.dev@gmail.com
+}
+
+# Frontend (Next.js) público
+staging.terremotovenezuela.app {
+	encode zstd gzip
+
+	@nextStatic path /_next/static/*
+	header @nextStatic Cache-Control "public, max-age=31536000, immutable"
+
+	@notStatic not path /_next/static/*
+	header @notStatic Cache-Control "no-cache, must-revalidate"
+
+	reverse_proxy frontend:3000
+}
+
+# Backend API (Express)
+api-staging.terremotovenezuela.app {
+	encode zstd gzip
+	reverse_proxy backend:8080
+}
+
+# Panel admin (Next standalone)
+admin-staging.terremotovenezuela.app {
+	encode zstd gzip
+	reverse_proxy admin:3000
+}

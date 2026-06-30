@@ -11,7 +11,7 @@
  * Clave R2: images/hub/<type>/<hub_id>.<ext>
  */
 import { targetPool } from "../db";
-import { objectExists, putObject, publicUrl } from "../r2";
+import { objectExists, putObject, publicUrl, withPrefix } from "../r2";
 import { HUB_HAS_PHOTO, HUB_TABLE, type HubType } from "../hub/config";
 
 const MAX_BYTES = Number(process.env.HUB_IMAGE_MAX_BYTES || 8_000_000); // 8MB
@@ -69,7 +69,7 @@ export async function hubImage(type: HubType, hubId: string): Promise<HubImageRe
     return { status: "broken" };
   }
 
-  const key = `images/hub/${type}/${hubId}.${EXT[contentType]}`;
+  const key = withPrefix(`images/hub/${type}/${hubId}.${EXT[contentType]}`);
   let url: string;
   if (await objectExists(key)) {
     url = publicUrl(key);

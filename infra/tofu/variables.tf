@@ -84,6 +84,66 @@ variable "valkey_private_ip" {
   default = "10.0.1.11"
 }
 
+# --- Hub Postgres (réplica pública saneada, RFC 0006) ---
+variable "hub_private_ip" {
+  description = "IP privada fija del hub (recibe replicación del primario)."
+  type        = string
+  default     = "10.0.1.12"
+}
+variable "hub_volume_size" {
+  description = "Tamaño (GB) del volumen de datos del hub."
+  type        = number
+  default     = 40
+}
+variable "hub_db" {
+  description = "Nombre de la base pública en el hub."
+  type        = string
+  default     = "public_db"
+}
+variable "hub_repl_user" {
+  description = "Rol de replicación del hub (lo usa CREATE SUBSCRIPTION)."
+  type        = string
+  default     = "hub_repl"
+}
+variable "hub_repl_password" {
+  type      = string
+  sensitive = true
+}
+variable "hub_admin_user" {
+  description = "Rol CREATEROLE que usa el backend para crear roles de consumidor."
+  type        = string
+  default     = "hub_admin"
+}
+variable "hub_admin_password" {
+  type      = string
+  sensitive = true
+}
+
+# Allowlists del firewall del hub (mapa-hub-fw). Vacío = cerrado a internet.
+variable "hub_admin_ips" {
+  description = "IPs admin con SSH al hub. Restringe a operadores; evita 0.0.0.0/0."
+  type        = list(string)
+  default     = []
+}
+variable "hub_consumer_ips" {
+  description = <<-EOT
+    Lista blanca de IPs de consumidores externos para 5432 público. Vacía =
+    nadie llega al puerto (la replicación privada sigue OK). Se amplía aquí
+    (tofu) o vía el backend/API de Hetzner (RFC 0006, modelo B).
+  EOT
+  type        = list(string)
+  default     = []
+}
+variable "hub_consumer_pg_hba" {
+  description = <<-EOT
+    Origen para la regla hostssl de consumidores en pg_hba del hub. El firewall
+    ya filtra por IP; esto es defensa en profundidad. "0.0.0.0/0" delega el
+    control de IP 100% al firewall; o pon un CIDR para doble candado.
+  EOT
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
 # --- k3s cluster ---
 variable "k3s_token" {
   description = "Shared secret that joins agents to the server. From TF_VAR_k3s_token (openssl rand -hex 32)."

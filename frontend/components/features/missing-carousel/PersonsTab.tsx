@@ -13,6 +13,7 @@ import {
   useMarkFound,
   useMissingList,
   useMissingStats,
+  usePrefetchMissingPages,
   type MissingPerson,
 } from "@/hooks/missing";
 import { qk } from "@/lib/query-keys";
@@ -72,21 +73,29 @@ export const PersonsTab = forwardRef<PersonsTabHandle>(function PersonsTab(
   }, [query]);
 
   const search = debouncedQuery.trim();
-  const { data } = useMissingList(
-    {
-      status: filter,
-      page,
-      pageSize,
-      q: search.length >= MIN_SEARCH_LEN ? search : undefined,
-    },
-    network.pollIntervalMs,
-  );
+  const listParams = {
+    status: filter,
+    page,
+    pageSize,
+    q: search.length >= MIN_SEARCH_LEN ? search : undefined,
+  };
+  const { data } = useMissingList(listParams, network.pollIntervalMs);
   const stats = useMissingStats();
 
   const people = data?.people ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
   const foundTotal = stats.data?.found ?? 0;
+
+  // Prefetch de páginas vecinas: al asentarse en una página, calienta la
+  // siguiente/anterior para que paginar sea instantáneo (sin esperar la red).
+  const prefetchMissingPages = usePrefetchMissingPages();
+  useEffect(() => {
+    if (totalPages <= 1) return;
+    prefetchMissingPages(listParams, totalPages);
+    // listParams se deriva de estos campos; evitamos el objeto en deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, page, pageSize, search, totalPages, prefetchMissingPages]);
 
   // Reset a página 1 al cambiar tamaño de grilla, búsqueda o filtro.
   useEffect(() => {

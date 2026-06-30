@@ -94,3 +94,41 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 8080
+---
+# admin -> selector tier=admin -> LB "admin-lb" -> admin.terremoto… (PANEL :3000)
+# Tercer LB = aislamiento total del panel respecto a web/api (su propio
+# blast-radius y TLS). El panel sirve en :3000 (Next standalone) y su BFF expone
+# /api/health para el health-check del LB.
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: mapa
+  annotations:
+    load-balancer.hetzner.cloud/location: "hel1"
+    load-balancer.hetzner.cloud/use-private-ip: "true"
+    load-balancer.hetzner.cloud/name: "admin-lb"
+    # hostname: estabiliza el endpoint si el LB se recrea (IP nueva) — el DNS de
+    # admin.* apunta a este hostname, no a la IP cruda (ver nota en `web`).
+    load-balancer.hetzner.cloud/hostname: "lb-admin.terremotovenezuela.app"
+    # El panel SÍ tiene /api/health (BFF), desacoplado de upstreams.
+    load-balancer.hetzner.cloud/health-check-protocol: "http"
+    load-balancer.hetzner.cloud/health-check-http-path: "/api/health"
+    load-balancer.hetzner.cloud/health-check-interval: "15s"
+    load-balancer.hetzner.cloud/health-check-retries: "2"
+    load-balancer.hetzner.cloud/uses-proxyprotocol: "false"
+${ADMIN_TLS_ANNOTATIONS}
+spec:
+  type: LoadBalancer
+  selector:
+    app: mapa
+    tier: admin
+  ports:
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 3000
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 3000

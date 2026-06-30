@@ -51,11 +51,15 @@ principal.
    git fetch upstream
    ```
 
-4. Crea una rama desde `upstream/main`:
+4. Crea una rama desde `upstream/staging` (NO desde `main`):
 
    ```bash
-   git switch -c fix/descripcion-corta upstream/main
+   git switch -c fix/descripcion-corta upstream/staging
    ```
+
+   > El trabajo se integra primero en `staging` y de ahí se promociona a `main`.
+   > A `main` solo se llega por un PR **desde** `staging` (lo verifica un check de
+   > CI). Ver [docs/deploy/ramas-y-promocion.md](docs/deploy/ramas-y-promocion.md).
 
 5. Instala dependencias y corre la app:
 
@@ -73,12 +77,13 @@ principal.
    npm run build
    ```
 
-8. Sube tu rama y abre un PR contra
-   `ArturoRiosMock/mapa-emergencia-rescate:main`.
+8. Sube tu rama y abre un PR contra la rama **`staging`** del repo principal
+   (`ArturoRiosMock/mapa-emergencia-rescate:staging`), NO contra `main`.
 
 Si eres maintainer, puedes crear una rama en el repo principal, pero conserva la
-misma disciplina: rama desde `main`, PR pequeño, issue enlazada y validación
-clara.
+misma disciplina: rama desde `staging`, PR pequeño contra `staging`, issue
+enlazada y validación clara. La promoción `staging` → `main` (que despliega a
+prod) la hace un maintainer con un PR aparte.
 
 ## Crear issues útiles
 
@@ -119,7 +124,7 @@ Manten el PR revisable:
 - Prefiere cambios pequeños a un PR grande con muchas responsabilidades.
 - No mezcles refactors estéticos con fixes funcionales.
 - No subas credenciales, `.env.local`, dumps o datos reales.
-- Rebasea o actualiza tu rama si `main` cambió mucho antes de mergear.
+- Rebasea o actualiza tu rama si `staging` cambió mucho antes de mergear.
 - Responde comentarios con commits nuevos; evita resolver conversaciones sin
   explicar el cambio.
 

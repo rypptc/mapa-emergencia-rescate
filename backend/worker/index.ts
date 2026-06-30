@@ -14,6 +14,10 @@ import {
   registerMaintenanceSchedulers,
 } from "./maintenance.queue";
 import { createPatientImportsWorker } from "./patientImports.queue";
+import {
+  createEarthquakesWorker,
+  registerEarthquakeSchedulers,
+} from "./earthquakes.queue";
 import { recordDeadLetter, isExhausted } from "./deadletter";
 import { closePools } from "./db";
 
@@ -75,6 +79,21 @@ patientImportsWorker.on("completed", (job, r) =>
 );
 workers.push(patientImportsWorker);
 
+// Worker de sismos (USGS). Sync incremental del feed realtime cada minuto +
+// backfill de arranque. Trabajo chico (Venezuela: <1 sismo/día).
+const earthquakesWorker = createEarthquakesWorker();
+earthquakesWorker.on("failed", (job, err) => {
+  console.error(`[earthquakes] job ${job?.id} failed:`, err?.message || err);
+  if (isExhausted(job)) void recordDeadLetter("earthquakes", job, err, Date.now());
+});
+earthquakesWorker.on("error", (err) =>
+  console.error("[earthquakes] worker error:", err?.message || err),
+);
+earthquakesWorker.on("completed", (job, r) =>
+  console.log(`[earthquakes] ${job.id} ->`, JSON.stringify(r)),
+);
+workers.push(earthquakesWorker);
+
 console.log(`[worker] started ${workers.length} workers`);
 
 // Schedulers repetibles del hub (Celery-Beat-equivalente): incremental cada
@@ -97,6 +116,14 @@ if (process.env.SYNC_SCHEDULERS !== "0") {
     console.error("[maintenance] no se pudieron registrar schedulers:", err?.message || err),
   );
 }
+
+// Sismos USGS: SIEMPRE encendido (no va bajo SYNC_SCHEDULERS, que apaga los
+// scrapers/federación pesados). Es dato público, barato y siempre deseado: una
+// llamada al feed cada minuto + backfill de arranque idempotente (solo si la
+// tabla está vacía → siembra sola en el primer deploy, sin Job ni paso manual).
+registerEarthquakeSchedulers().catch((err) =>
+  console.error("[earthquakes] no se pudieron registrar schedulers:", err?.message || err),
+);
 
 // Cap del drenado: worker.close() espera a que terminen los jobs activos, pero
 // un job puede correr ~200s (sync chunked). Acotamos a 210s (< los 240s del

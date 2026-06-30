@@ -9,6 +9,9 @@
  * filas viven en la DB de staging, no en el job.
  *
  * Modos:
+ *   - ocr:     extrae filas de una imagen vía OCR/ICR (Minimax) y las materializa
+ *              en staging (review-required), luego corre el process. La imageUrl
+ *              viaja en el payload del job, NUNCA se persiste en la DB.
  *   - process: normaliza, valida y deduplica el staging del lote.
  *   - apply:   escribe las filas válidas y únicas en hospital_patients (idempotente).
  */
@@ -18,22 +21,27 @@ import { getRedis } from "./redis";
 const PREFIX = process.env.QUEUE_PREFIX || "mapa";
 export const PATIENT_IMPORTS_QUEUE = "patient-imports";
 
-type PatientImportMode = "process" | "apply";
+type PatientImportMode = "ocr" | "process" | "apply";
 
 interface PatientImportJobData {
   importId: string;
   mode: PatientImportMode;
   actorId?: string | null;
+  imageUrl?: string;
 }
 
 const processor: Processor = async (job) => {
   const data = job.data as PatientImportJobData;
   // Import relativo a src/ (mismo patrón que worker/sync/dedup.ts) para no
   // depender del resolutor de alias "@/" en el entrypoint del worker.
-  const { processImport, applyImport, markImportFailed } = await import(
+  const { ingestOcrImport, processImport, applyImport, markImportFailed } = await import(
     "../src/services/patient-imports"
   );
   try {
+    if (data.mode === "ocr") {
+      const r = await ingestOcrImport(data.importId, data.imageUrl);
+      return { mode: "ocr", importId: data.importId, counts: r.counts };
+    }
     if (data.mode === "process") {
       const r = await processImport(data.importId);
       return { mode: "process", importId: data.importId, counts: r.counts };
@@ -50,7 +58,10 @@ const processor: Processor = async (job) => {
     const maxAttempts = job.opts.attempts ?? 1;
     if (attemptsMade >= maxAttempts) {
       const msg = err instanceof Error ? err.message : "Error desconocido";
-      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`, data.mode).catch(
+      // failedStage solo distingue process|apply; el OCR es un precursor del
+      // process (materializa staging), así que se sella en la etapa "process".
+      const failedStage = data.mode === "apply" ? "apply" : "process";
+      await markImportFailed(data.importId, `Falló el ${data.mode}: ${msg}`, failedStage).catch(
         () => {},
       );
     }

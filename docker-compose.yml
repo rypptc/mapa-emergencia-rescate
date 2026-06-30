@@ -92,8 +92,18 @@ services:
       # --- Auth api/public/* (JWT cookie + Bearer) ---
       JWT_SECRET: local-dev-jwt-secret-not-for-prod-0123456789
       COOKIE_SECURE: "false" # http local; en prod va a true (validado por env)
-      APP_BASE_URL: http://localhost:3000
-      # SMTP sin setear en local → el invite devuelve el link en la respuesta.
+      # Base para los links de invitación/reset. Es el PANEL admin (ahí aterriza
+      # quien acepta una invitación), no el sitio público. Local: :3001; en prod
+      # pon ADMIN_BASE_URL=https://admin.terremotovenezuela.app en tu .env.
+      APP_BASE_URL: "${ADMIN_BASE_URL:-http://localhost:3001}"
+      # SMTP: se interpola desde .env (de la raíz). Sin .env quedan vacíos y el
+      # backend cae a modo dev (el invite devuelve el link; el OTP se loguea).
+      # Pon los SMTP_* reales en .env para enviar correos localmente.
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-Mapa Emergencia <noreply@dreamit.software>}"
       # OCR/ICR (Minimax VL) DESACTIVADO en local por defecto: sin MINIMAX_API_KEY
       # el proveedor no se construye y el ingest OCR/ICR responde 501. Para probarlo
       # localmente, exporta MINIMAX_API_KEY en tu entorno (NUNCA commitees el token):
@@ -126,6 +136,29 @@ services:
       INTERNAL_API_URL: http://backend:8080
     ports:
       - "3000:3000"
+    depends_on:
+      - backend
+
+  # Panel de administración (rescatistas) — microservicio Next standalone aparte
+  # del sitio público. En prod va en admin.terremotovenezuela.app con su propio
+  # LB; aquí corre en :3001. Habla con el backend SOLO server-side (su BFF) por
+  # la red interna; el navegador llama same-origin al BFF del admin.
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # El BFF del admin llama al backend por la red interna de Docker.
+      EMERGENCY_API_URL: http://backend:8080
+      # Cookie de sesión httpOnly. En local (http) NO puede ser Secure o el
+      # navegador la descarta; en prod (https) va a true. Espeja el backend.
+      COOKIE_SECURE: "false"
+      # TTL de la cookie de sesión del BFF (seg). Espeja JWT_TTL_SECONDS.
+      SESSION_MAX_AGE_SECONDS: "43200"
+    ports:
+      - "3001:3000"
     depends_on:
       - backend
 

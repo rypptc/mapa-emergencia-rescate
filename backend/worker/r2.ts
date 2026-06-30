@@ -34,6 +34,17 @@ function bucket(): string {
   return b;
 }
 
+/**
+ * Namespace prefix for keys (isolates environments within the SAME bucket).
+ * Empty in prod -> keys `images/...` (unchanged). In staging set
+ * R2_KEY_PREFIX=staging -> keys `staging/images/...`, so staging never overwrites
+ * prod photos. Apply at EVERY key-construction site (jobs build keys directly).
+ */
+export function withPrefix(key: string): string {
+  const prefix = (process.env.R2_KEY_PREFIX || "").replace(/^\/+|\/+$/g, "");
+  return prefix ? `${prefix}/${key}` : key;
+}
+
 /** Public CDN URL for a stored object key. */
 export function publicUrl(key: string): string {
   const base = (process.env.R2_PUBLIC_BASE || "").replace(/\/$/, "");

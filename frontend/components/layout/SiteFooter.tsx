@@ -127,6 +127,30 @@ export default function SiteFooter() {
                 </li>
               </ul>
             </div>
+
+            <div>
+              <h4 className="qi-eyebrow text-[var(--etext2)]">
+                📦 Acopio y ayuda
+              </h4>
+              <ul className="mt-2 space-y-2">
+                <li>
+                  <a
+                    href="https://responsegrid.app/e/terremoto-venezuela-2026"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="e-card block px-3 py-2 text-sm transition hover:shadow-md"
+                  >
+                    <span className="font-semibold text-[var(--etext)]">
+                      ResponseGrid
+                    </span>
+                    <span className="block text-xs text-[var(--etext2)]">
+                      Directorio de centros de acopio y necesidades · datos por
+                      ResponseGrid / Global Emergency (CC BY-SA 4.0)
+                    </span>
+                  </a>
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
 
@@ -177,17 +201,17 @@ export default function SiteFooter() {
           </p>
           <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 sm:shrink-0 sm:justify-end">
             <Link
+              href="/metodologia"
+              className="whitespace-nowrap text-[var(--etext3)] hover:text-[var(--etext2)] hover:underline"
+            >
+              Metodología
+            </Link>
+            <Link
               href="/riesgo-sismico"
               className="whitespace-nowrap text-[var(--etext3)] hover:text-[var(--etext2)] hover:underline"
             >
               Riesgo sísmico
             </Link>
-            <a
-              href="/admin"
-              className="whitespace-nowrap text-[var(--etext3)] hover:text-[var(--etext2)] hover:underline"
-            >
-              Panel de administración
-            </a>
           </div>
         </div>
       </div>

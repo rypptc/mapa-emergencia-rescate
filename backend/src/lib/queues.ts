@@ -128,21 +128,34 @@ export async function enqueueDuplicatesReport(
   return job.id!;
 }
 
-/** Modo del job de importación de pacientes: procesar staging o aplicar al final. */
-export type PatientImportMode = "process" | "apply";
+/**
+ * Modo del job de importación de pacientes:
+ *   - ocr:     extrae filas de una imagen vía el proveedor OCR/ICR y las
+ *              materializa en staging (review-required), luego corre el process.
+ *   - process: normaliza/valida/deduplica el staging del lote.
+ *   - apply:   escribe las filas válidas y únicas al final.
+ */
+export type PatientImportMode = "ocr" | "process" | "apply";
 
 export interface PatientImportJobData {
   importId: string;
   mode: PatientImportMode;
   /** user.id que disparó el apply (auditoría/procedencia). Opcional. */
   actorId?: string | null;
+  /**
+   * URL de imagen (http/https) a extraer por OCR/ICR. SOLO para mode "ocr". Vive
+   * únicamente en el payload del job (Redis), NUNCA se persiste en la DB de
+   * staging ni se expone en respuestas: es dato sensible de origen.
+   */
+  imageUrl?: string;
 }
 
 /**
- * Encola el procesado o el apply de un lote de pacientes. jobId determinístico
- * por (modo, importId): un re-disparo con un job pendiente del mismo modo es
- * no-op (idempotencia). El payload es minúsculo (solo el id) — las filas viven
- * en la DB de staging, no en el job. Devuelve el jobId para trazabilidad.
+ * Encola el OCR, el procesado o el apply de un lote de pacientes. jobId
+ * determinístico por (modo, importId): un re-disparo con un job pendiente del
+ * mismo modo es no-op (idempotencia). El payload es minúsculo (id + url OCR
+ * opcional) — las filas viven en la DB de staging, no en el job. Devuelve el
+ * jobId para trazabilidad.
  */
 export async function enqueuePatientImport(
   data: PatientImportJobData,

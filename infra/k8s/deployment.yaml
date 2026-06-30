@@ -180,3 +180,97 @@ spec:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 5"]
+---
+# admin : PANEL ADMIN (Next standalone, microservicio aparte del sitio público).
+# Lo usan rescatistas/coordinadores. Habla con el backend SOLO server-side (su
+# BFF) por la red interna del clúster; el navegador llama same-origin al BFF.
+# Réplicas bajas (no es tráfico público masivo). CI parchea el tag a -admin:<sha>.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: mapa
+  labels:
+    app: mapa
+    tier: admin
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: mapa
+      tier: admin
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: mapa
+        tier: admin
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: mapa
+                    tier: admin
+                topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 40
+      containers:
+        # PANEL ADMIN (Next standalone). CI parchea el tag a -admin:<sha>.
+        - name: app
+          image: ghcr.io/OWNER/REPO-admin:latest
+          ports:
+            - containerPort: 3000
+          # SIN envFrom app-env a propósito (least-privilege): el panel NO usa la
+          # DB/Valkey/Turnstile ni ADMIN_PASSWORD — solo habla con el backend por
+          # su BFF. Inyectar esos secretos aquí ampliaría el blast-radius sin
+          # razón. Todo lo que el admin lee va EXPLÍCITO abajo. PORT/HOSTNAME/
+          # NODE_ENV los fija el Dockerfile.
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"
+            # El BFF del admin llama al backend por la red interna del clúster.
+            - name: EMERGENCY_API_URL
+              value: "http://api.mapa.svc.cluster.local"
+            # Prod = HTTPS: la cookie de sesión va Secure.
+            - name: COOKIE_SECURE
+              value: "true"
+            - name: SESSION_MAX_AGE_SECONDS
+              value: "43200"
+          # El admin SÍ tiene /api/health (BFF) desacoplado de upstreams.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "384Mi"
+            limits:
+              memory: "640Mi"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]

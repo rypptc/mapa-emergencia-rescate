@@ -22,6 +22,10 @@ export const qk = {
     all: ["reports"] as const,
     list: ["reports", "list"] as const,
   },
+  earthquakes: {
+    all: ["earthquakes"] as const,
+    list: ["earthquakes", "list"] as const,
+  },
   hospitals: {
     all: ["hospitals"] as const,
     list: (p?: Record<string, unknown>) => ["hospitals", "list", p ?? {}] as const,
@@ -39,6 +43,11 @@ export const qk = {
   },
   contact: {
     all: ["contact"] as const,
+  },
+  acopio: {
+    all: ["acopio"] as const,
+    list: (p: { country?: string; category?: string; q?: string }) =>
+      ["acopio", "list", p] as const,
   },
   geocode: (q: string) => ["geocode", q] as const,
 } as const;

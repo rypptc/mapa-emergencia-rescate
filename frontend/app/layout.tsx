@@ -69,6 +69,21 @@ const SITE_DESC =
   "Reporte ciudadano en tiempo real para coordinar rescates, identificar daños estructurales y organizar la entrega de ayuda humanitaria tras el terremoto en Venezuela.";
 const OPENPANEL_CLIENT_ID = process.env.NEXT_PUBLIC_OPENPANEL_CLIENT_ID;
 
+// Orígenes cross-origin que el navegador SIEMPRE golpea: el backend (datos de
+// emergencia, vía fetch con credenciales) y el CDN R2 (fotos). Preconectar
+// adelanta DNS+TCP+TLS para que el primer request no pague el handshake. Solo el
+// origin (esquema+host), no la ruta. Guardado por si el env viene vacío/inválido.
+function safeOrigin(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+const API_ORIGIN = safeOrigin(process.env.NEXT_PUBLIC_API_URL);
+const R2_ORIGIN = safeOrigin(process.env.NEXT_PUBLIC_R2_PUBLIC_BASE);
+
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   alternates: { canonical: "/" },
@@ -156,6 +171,20 @@ export default function RootLayout({
       className={`${stara.variable} ${spaceGrotesk.variable} h-full overflow-x-hidden antialiased`}
       suppressHydrationWarning
     >
+      <head>
+        {/* Preconexión a los orígenes cross-origin críticos. El backend va con
+            credenciales (cookies) → use-credentials; el CDN R2 es anónimo. */}
+        {API_ORIGIN && (
+          <link
+            rel="preconnect"
+            href={API_ORIGIN}
+            crossOrigin="use-credentials"
+          />
+        )}
+        {R2_ORIGIN && (
+          <link rel="preconnect" href={R2_ORIGIN} crossOrigin="anonymous" />
+        )}
+      </head>
       <body className="min-h-full flex flex-col overflow-x-hidden bg-[var(--ebg)] text-[var(--etext)]">
         <ThemeProvider />
         <a

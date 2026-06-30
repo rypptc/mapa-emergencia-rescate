@@ -62,3 +62,14 @@ export const SEVERITY_LEVELS: Severity[] = [1, 2, 3, 4];
 export function severityMeta(value: number): SeverityMeta {
   return SEVERITY[value as Severity] ?? SEVERITY[1];
 }
+
+/** Mapea la magnitud de un sismo (escala Richter/Mw) a la escala de severidad
+ * 1–4, para reutilizar los mismos colores/emoji que la capa de edificios.
+ * Umbrales: <3 leve · 3–4 moderado · 4–5 severo · ≥5 colapsado. `null` (USGS
+ * aún sin magnitud) cae en "Leve". */
+export function magnitudeSeverity(magnitude: number | null): Severity {
+  if (magnitude === null || magnitude < 3) return 1;
+  if (magnitude < 4) return 2;
+  if (magnitude < 5) return 3;
+  return 4;
+}

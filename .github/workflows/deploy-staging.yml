@@ -1,0 +1,144 @@
+# Deploy de STAGING a un único VPS Debian de Hetzner (docker compose + Caddy).
+#
+# Espeja el patrón de boahaus + prod (deploy-hetzner.yml): GH Actions arma el env
+# desde secrets PER-KEY del environment `staging` (subidos con
+# ./upload-github-secrets.sh -f .staging.env -e staging), lo rsyncea al VPS por
+# password (sshpass) y corre `docker compose up`.
+#
+# Secrets de conexión (solo para el workflow, NO van en .staging.env del VPS):
+#   STAGING_HOST, STAGING_USER, STAGING_PASSWORD, STAGING_PROJECT_PATH.
+# El resto de secrets del environment son las vars de runtime del stack y se
+# escriben a .staging.env más abajo.
+#
+# El VPS debe tener Docker + docker compose instalados y el puerto 22 abierto a
+# los runners. Caddy obtiene TLS de Let's Encrypt solo (necesita 80/443 públicos
+# y DNS de staging.* apuntando al VPS).
+name: deploy-staging
+
+on:
+  # Auto-deploy al hacer merge a `staging` (espeja el modelo de prod: push a main
+  # despliega prod). El merge directo está bloqueado por ruleset, así que esto
+  # dispara tras un PR aprobado a staging.
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      # Arma .staging.env desde los secrets per-key del environment `staging`
+      # (mismo modelo que prod). Los STAGING_* de conexión NO se incluyen: son
+      # para el workflow, no para los contenedores.
+      - name: Armar .staging.env desde secrets
+        env:
+          NODE_ENV: ${{ secrets.NODE_ENV }}
+          PORT: ${{ secrets.PORT }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VALKEY_URL: ${{ secrets.VALKEY_URL }}
+          SYNC_SCHEDULERS: ${{ secrets.SYNC_SCHEDULERS }}
+          HUB_SCHEDULERS: ${{ secrets.HUB_SCHEDULERS }}
+          PHOTOS_CONCURRENCY: ${{ secrets.PHOTOS_CONCURRENCY }}
+          TABLES_CONCURRENCY: ${{ secrets.TABLES_CONCURRENCY }}
+          PHOTO_RATE_MAX: ${{ secrets.PHOTO_RATE_MAX }}
+          MIGRATIONS_DIR: ${{ secrets.MIGRATIONS_DIR }}
+          SKIP_SEED: ${{ secrets.SKIP_SEED }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          COOKIE_SECURE: ${{ secrets.COOKIE_SECURE }}
+          SESSION_MAX_AGE_SECONDS: ${{ secrets.SESSION_MAX_AGE_SECONDS }}
+          SEED_ADMIN_EMAIL: ${{ secrets.SEED_ADMIN_EMAIL }}
+          SEED_ADMIN_PASSWORD: ${{ secrets.SEED_ADMIN_PASSWORD }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          TURNSTILE_SITE_KEY: ${{ secrets.TURNSTILE_SITE_KEY }}
+          IP_SALT: ${{ secrets.IP_SALT }}
+          TRUSTED_IP_HEADER: ${{ secrets.TRUSTED_IP_HEADER }}
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          ADMIN_BASE_URL: ${{ secrets.ADMIN_BASE_URL }}
+          EMERGENCY_API_URL: ${{ secrets.EMERGENCY_API_URL }}
+          R2_KEY_PREFIX: ${{ secrets.R2_KEY_PREFIX }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_STATIC_BUCKET: ${{ secrets.R2_STATIC_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_R2_PUBLIC_BASE: ${{ secrets.NEXT_PUBLIC_R2_PUBLIC_BASE }}
+          NEXT_PUBLIC_ASSET_PREFIX: ${{ secrets.NEXT_PUBLIC_ASSET_PREFIX }}
+          NEXT_PUBLIC_OPENPANEL_CLIENT_ID: ${{ secrets.NEXT_PUBLIC_OPENPANEL_CLIENT_ID }}
+          NEXT_PUBLIC_OPENPANEL_PRODUCTION_HOST: ${{ secrets.NEXT_PUBLIC_OPENPANEL_PRODUCTION_HOST }}
+          NEXT_PUBLIC_OPENPANEL_DASHBOARD_URL: ${{ secrets.NEXT_PUBLIC_OPENPANEL_DASHBOARD_URL }}
+          OPENPANEL_CLIENT_SECRET: ${{ secrets.OPENPANEL_CLIENT_SECRET }}
+        run: |
+          # Escribe cada var como KEY=value, con el valor entre comillas simples
+          # (seguro para caracteres especiales en passwords/URLs).
+          : > .staging.env
+          for k in NODE_ENV PORT POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB \
+                   DATABASE_URL VALKEY_URL SYNC_SCHEDULERS HUB_SCHEDULERS \
+                   PHOTOS_CONCURRENCY TABLES_CONCURRENCY PHOTO_RATE_MAX \
+                   MIGRATIONS_DIR SKIP_SEED JWT_SECRET COOKIE_SECURE \
+                   SESSION_MAX_AGE_SECONDS SEED_ADMIN_EMAIL SEED_ADMIN_PASSWORD \
+                   ADMIN_PASSWORD CORS_ORIGINS TURNSTILE_SECRET_KEY \
+                   TURNSTILE_SITE_KEY IP_SALT TRUSTED_IP_HEADER APP_BASE_URL \
+                   ADMIN_BASE_URL EMERGENCY_API_URL R2_KEY_PREFIX R2_ENDPOINT \
+                   R2_STATIC_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY \
+                   R2_PUBLIC_BASE SMTP_HOST SMTP_PORT SMTP_USERNAME \
+                   SMTP_PASSWORD SMTP_FROM NEXT_PUBLIC_API_URL \
+                   NEXT_PUBLIC_R2_PUBLIC_BASE NEXT_PUBLIC_ASSET_PREFIX \
+                   NEXT_PUBLIC_OPENPANEL_CLIENT_ID \
+                   NEXT_PUBLIC_OPENPANEL_PRODUCTION_HOST \
+                   NEXT_PUBLIC_OPENPANEL_DASHBOARD_URL OPENPANEL_CLIENT_SECRET; do
+            v="${!k}"
+            # comillas simples + escape de comilla simple interna
+            printf "%s='%s'\n" "$k" "${v//\'/\'\\\'\'}" >> .staging.env
+          done
+          # Guard: las vars críticas no pueden ir vacías.
+          for req in POSTGRES_PASSWORD DATABASE_URL JWT_SECRET; do
+            grep -qE "^$req='.+'" .staging.env || { echo "::error::$req vacío — ¿falta el secret en el environment staging?"; exit 1; }
+          done
+          echo "Escritas $(wc -l < .staging.env) vars en .staging.env"
+
+      - name: Instalar sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+      # Copia el repo + .staging.env al VPS. --delete mantiene el dir limpio;
+      # incluimos explícitamente .staging.env (lo ignora .gitignore, no git, pero
+      # rsync excluye dotfiles solo si se lo pides — aquí lo incluimos a mano).
+      - name: Copiar al VPS (rsync)
+        env:
+          SSHPASS: ${{ secrets.STAGING_PASSWORD }}
+        run: |
+          sshpass -e rsync -az --delete \
+            --exclude='.git' --exclude='node_modules' \
+            --include='.staging.env' \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}:${{ secrets.STAGING_PROJECT_PATH }}/"
+
+      - name: Levantar el stack en el VPS
+        env:
+          SSHPASS: ${{ secrets.STAGING_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }}" <<'SSH'
+            set -euo pipefail
+            cd "${{ secrets.STAGING_PROJECT_PATH }}"
+            docker compose -f docker-compose.staging.yml --env-file .staging.env pull || true
+            docker compose -f docker-compose.staging.yml --env-file .staging.env up -d --build
+            docker compose -f docker-compose.staging.yml --env-file .staging.env ps
+          SSH

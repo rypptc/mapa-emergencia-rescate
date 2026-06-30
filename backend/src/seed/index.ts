@@ -61,10 +61,14 @@ async function main(): Promise<void> {
   for (const [label, table] of guarded) {
     const n = await countNonDemo(db, table);
     if (n > 0) {
-      throw new Error(
-        `[seed] ${label} tiene ${n} fila(s) NO-demo (dump real). Abortado para no mezclar. ` +
-          `Usa una DB vacía o solo con datos DEMO-.`,
+      // Anti-mezcla: ya hay un dump real cargado. Saltar el seed DEMO es lo
+      // correcto (no es un fallo), así que salimos limpio en vez de romper el
+      // `docker compose up`. Las migraciones + seed RBAC ya corrieron antes.
+      console.log(
+        `[seed] ${label} tiene ${n} fila(s) NO-demo (dump real). ` +
+          `Omito el seed DEMO para no mezclar. (DB vacía o solo DEMO- para sembrar.)`,
       );
+      return;
     }
   }
 

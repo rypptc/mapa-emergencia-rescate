@@ -4,7 +4,7 @@
 #
 # Docs: https://docs.github.com/en/repositories/managing-your-repos-settings-and-features/customizing-your-repository/about-code-owners
 
-* @ArturoRiosMock
-frontend @takove @ArturoRiosMock
+* @ArturoRiosMock @osmarbetancourt
+frontend @takove @ArturoRiosMock @osmarbetancourt
 backend @vgpastor @osmarbetancourt @Emuthmartinez
 infra @osmarbetancourt @vgpastor

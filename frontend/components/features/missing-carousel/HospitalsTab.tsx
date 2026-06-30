@@ -43,7 +43,9 @@ export function HospitalsTab() {
   const gridCols = useHospitalGridColumns();
 
   const { data, isLoading } = useHospitals();
-  const hospitals = data?.hospitals ?? [];
+  // useMemo: sin esto, `data?.hospitals ?? []` crea un array nuevo en cada
+  // render cuando data es undefined, recalculando el useMemo de `visible`.
+  const hospitals = useMemo(() => data?.hospitals ?? [], [data?.hospitals]);
   const loading = isLoading;
 
   const visible = useMemo(

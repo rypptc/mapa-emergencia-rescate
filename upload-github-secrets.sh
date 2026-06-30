@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # Upload .env-style secrets to a GitHub repository environment.
 # Requires: GitHub CLI (gh) installed and authenticated with repo write perms.
-# Usage:
-#   ./upload-github-secrets.sh -f .env -r ArturoRiosMock/mapa-emergencia-rescate
+#
+# Entornos de este repo (sube a uno con -e <env>):
+#   production-hetzner  -> PROD (deploy-hetzner.yml, job `deploy`). Sube .env:
+#       ./upload-github-secrets.sh -f .env -e production-hetzner
+#   staging             -> STAGING (deploy-staging.yml, VPS Debian único). Sube
+#       el .staging.env como UN solo secret STAGING_ENV + los 4 de conexión SSH:
+#       gh secret set STAGING_ENV --env staging < .staging.env
+#       gh secret set STAGING_HOST --env staging --body <ip-del-vps>
+#       gh secret set STAGING_USER --env staging --body <usuario-ssh>
+#       gh secret set STAGING_PROJECT_PATH --env staging --body <ruta-en-el-vps>
+#       gh secret set STAGING_SSH_KEY --env staging < ~/.ssh/<clave-privada-staging>
 #
 # Supports two value forms:
 #   KEY=value          -> single-line value uploaded as-is
@@ -12,9 +21,10 @@ set -euo pipefail
 shopt -s extglob
 
 ENV_FILE=".env"
-REPO="ArturoRiosMock/mapa-emergencia-rescate"
-# Empty => REPO-LEVEL secrets (the repo has no Environments configured).
-# Pass -e <name> only if you create a GitHub Environment later.
+REPO="terremotovenezuela/mapa-emergencia-rescate"
+# Empty => REPO-LEVEL secrets. Para los deploys reales pasa -e con el entorno:
+#   -e production-hetzner  (prod, deploy-hetzner.yml)
+#   -e staging             (staging, deploy-staging.yml)
 ENVIRONMENT=""
 
 usage() {
@@ -22,7 +32,7 @@ usage() {
 Usage: ./upload-github-secrets.sh [-f env_file] [-r owner/repo] [-e environment]
   -f  Path to env file (default: .env)
   -r  GitHub repo owner/name (default: ArturoRiosMock/mapa-emergencia-rescate)
-  -e  GitHub environment name (optional; omit for repo-level secrets)
+  -e  GitHub environment name (production-hetzner | staging; omit = repo-level)
 
 Value forms in the env file:
   KEY=value          single-line value

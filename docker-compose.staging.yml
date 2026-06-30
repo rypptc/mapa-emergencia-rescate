@@ -1,0 +1,158 @@
+# Entorno STAGING: imita prod en un solo nodo con docker compose.
+#
+#   docker compose -f docker-compose.staging.yml --env-file .staging.env up -d --build
+#   docker compose -f docker-compose.staging.yml --env-file .staging.env logs -f backend
+#   docker compose -f docker-compose.staging.yml --env-file .staging.env down
+#
+# Diferencias clave vs docker-compose.yml (local):
+#   - Builds de PRODUCCIÓN (NODE_ENV=production, COOKIE_SECURE=true, TLS real).
+#   - Sin puertos de host en los servicios de app: SOLO Caddy es público (:80/:443).
+#     Caddy termina TLS (Let's Encrypt) y enruta por dominio a frontend/backend/admin.
+#   - Secretos desde .staging.env (gitignored), NO hardcoded localdev.
+#   - NO incluye el hub / réplica pública SQL (RFC 0006): staging no provisiona el
+#     hub; HUB_* quedan ausentes y /api/public/hub-credentials responde 503.
+#   - Red propia `mapa_staging_net`; los servicios se hablan por nombre.
+#
+# DNS requerido (apuntar al nodo de staging):
+#   staging.terremotovenezuela.app        -> frontend
+#   api-staging.terremotovenezuela.app    -> backend
+#   admin-staging.terremotovenezuela.app  -> admin
+services:
+  db:
+    image: postgres:16
+    # POSTGRES_* salen de .staging.env (env_file), no de interpolación del shell
+    # del runner — así un VPS recién creado inicializa la DB con el nombre correcto.
+    env_file: .staging.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - valkey_data:/data
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Job one-shot: migraciones + seed antes de que arranque el backend. Espeja el
+  # Job gateado de prod (infra/k8s/migrate-job.yaml). Idempotente.
+  migrate-seed:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: sh -c 'npm run migrate && { [ "$$SKIP_SEED" = "1" ] && echo "[seed] omitido (SKIP_SEED=1)" || npm run seed; }'
+    # SKIP_SEED + MIGRATIONS_DIR vienen de .staging.env (no los pisamos aquí: un
+    # `environment:` con ${SKIP_SEED:-0} sobreescribiría el env_file con 0).
+    env_file: .staging.env
+    restart: "no"
+    networks: [mapa_staging_net]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .staging.env
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate-seed:
+        condition: service_completed_successfully
+
+  # Worker BullMQ: MISMA imagen que el backend, distinto command (como en prod,
+  # infra/k8s/worker-deployment.yaml). No va detrás de Caddy (no sirve HTTP).
+  # Procesa colas: sync de fuentes, geocode, dedupe, federación hub, sismos,
+  # fotos→R2, backfills. Los scheduler flags (SYNC_SCHEDULERS/HUB_SCHEDULERS)
+  # vienen de .staging.env.
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["npx", "tsx", "worker/index.ts"]
+    env_file: .staging.env
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate-seed:
+        condition: service_completed_successfully
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* se inlinea en build → pasa como build-arg (dominio staging).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_R2_PUBLIC_BASE: ${NEXT_PUBLIC_R2_PUBLIC_BASE}
+    environment:
+      # SSR dentro de Docker llama al backend por la red interna, no por el dominio.
+      INTERNAL_API_URL: http://backend:8080
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    env_file: .staging.env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # El BFF del admin llama al backend por la red interna de Docker.
+      EMERGENCY_API_URL: http://backend:8080
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  # Proxy TLS público (único servicio con puertos de host). Termina HTTPS con
+  # certificados Let's Encrypt automáticos y enruta por dominio. Como en argo.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [mapa_staging_net]
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+      - admin
+
+networks:
+  mapa_staging_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  valkey_data:
+  caddy_data:
+  caddy_config:

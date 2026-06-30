@@ -190,7 +190,19 @@ autorización (`backend/test/`).
 ### Backend/API
 
 - Las rutas viven en `backend/src/routes/`; la lógica de negocio vive en
-  `backend/src/services/`.
+  `backend/src/services/`. Este patrón simple aplica al sitio público propio.
+- **Integraciones con terceros** (APIs externas que proyectamos en un dominio
+  propio) van como módulos DDD en `backend/src/modules/<dominio>/`, NO como un
+  `service` plano. Capas con dependencias hacia adentro:
+  `domain/` (entidades + value objects + reglas puras + el **puerto**/interfaz de
+  la fuente; sin HTTP ni `env`), `application/` (casos de uso), `infrastructure/`
+  (adaptadores que implementan el puerto: cliente HTTP, mapper anti-corruption,
+  decorador de cache), `interface/http/` (router + controller + presenter; única
+  capa con Express y el `@swagger`) y `<dominio>-module.ts` (composition root:
+  único sitio que lee `env` y cablea todo). Referencia: `modules/acopio/`.
+  Añadir otra fuente = otro adaptador del mismo puerto en el composition root.
+  El navegador nunca llama al tercero directo: siempre se proxea por el backend
+  (cache/contrato/CORS bajo nuestro control).
 - Monta rutas con `Router`, `asyncHandler`, `validate()` y los middlewares
   existentes (`rateLimit`, `requireHuman`, `requireAdmin`, auth de hospital)
   antes de crear helpers nuevos.
@@ -220,6 +232,40 @@ autorización (`backend/test/`).
   de Neon en `backend/worker/jobs/`, que espeja tablas históricas para importar
   datos; no copies ese patrón a endpoints públicos.
 
+### Actualizar listas de personas (hospitalizados / refugiados)
+
+Las personas localizadas (en hospital o en refugio/centro de acopio) viven en
+`hospital_patients`, ligadas a un lugar en `hospitals`. Conviven en la misma
+tabla para que una familia las encuentre en una sola búsqueda, distinguidas por:
+
+- `hospitals.facility_type`: `"refugio"` para centros de acopio/albergues; tipos
+  de hospital para el resto.
+- `hospital_patients.status`: `"hospitalized"` o `"sheltered"` ("En refugio").
+
+Son columnas `TEXT`: valores nuevos no requieren migración, pero sí agregar su
+etiqueta en `frontend/lib/hospitals-meta.ts` para que el front los muestre bien.
+
+Para **cargas en lote (bulk)** usa la skill `ingesta-pacientes`
+(`.claude/skills/ingesta-pacientes/`): tooling Node standalone (SQL crudo vía
+`pg`, **NO** Drizzle ni código de la app) que normaliza, mapea el lugar,
+deduplica, corre dry-run y respalda. Para UNA persona usa el panel admin.
+
+Flujo: `inspect` -> `detectar-lugares` (investiga y crea lugares nuevos con
+ubicación real + `source`; no inventa) -> `ingest` / `ingest-refugios` en
+dry-run -> revisa conteos/pendientes/conflictos y **pide OK a un maintainer** ->
+`--confirm` (idempotente; respaldo + rollback por `admitted_at` del lote).
+
+Reglas: dry-run siempre; OK explícito antes de prod; dedup por cédula (global) +
+nombre orden-insensible por lugar (no auto-fusiona conflictos de edad/cédula);
+no inventar lugares ni ubicaciones; **PII** (nombres, cédulas, diagnósticos)
+nunca a repos/issues/PRs/gists; la cédula va en `notes` como `CI: <dígitos>`.
+
+> Corre desde la raíz del repo con las deps del backend instaladas
+> (`cd backend && npm install`): la skill resuelve `pg` desde `backend/` y lee
+> `DATABASE_URL` de `.env.local`. Apunta a la base que cargues (local, Neon o el
+> Postgres de Hetzner); para prod (Hetzner) hace falta acceso de red al Postgres
+> privado (túnel SSH o Job en k3s), no basta la URL.
+
 ## Documentación
 
 - Escribe documentación en español.
@@ -235,6 +281,7 @@ autorización (`backend/test/`).
 ```text
 frontend/               Next.js UI/SSR, hooks, componentes, assets publicos
 backend/src/            Express API, servicios, middleware, acceso Drizzle
+backend/src/modules/    Integraciones como modulos DDD (dominio/aplicacion/infra/http)
 backend/worker/         BullMQ workers, sync, migraciones y backfills
 infra/db/               Esquema Drizzle + migraciones
 infra/k8s/              Deployments, Services, HPA, Jobs y Secrets ejemplo

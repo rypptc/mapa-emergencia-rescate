@@ -1,0 +1,31 @@
+# Enforce el flujo de promoción: a `main` solo se llega por PR DESDE `staging`.
+#
+# GitHub NO permite restringir la rama ORIGEN de un PR en rulesets (es una
+# limitación conocida: https://github.com/orgs/community/discussions/57404), así
+# que se hace con un status check requerido. Este job corre SOLO en PRs hacia
+# `main` y falla si la rama origen no es `staging`. Márcalo como check requerido
+# en el ruleset (contexto: "pr-source-guard").
+#
+# OJO (gotcha de checks requeridos): si el workflow se SALTARA quedaría "pending"
+# y bloquearía el merge para siempre. Por eso NO lleva filtros de `paths`: corre
+# en TODO PR a main. El nombre del job es único para que el match exacto del
+# ruleset funcione.
+name: pr-source-guard
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  pr-source-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Solo se promociona staging -> main
+        run: |
+          head="${{ github.head_ref }}"
+          echo "PR origen: $head  ->  destino: main"
+          if [ "$head" != "staging" ]; then
+            echo "::error::Los PR a main solo pueden venir de 'staging' (este viene de '$head'). Abre tu PR contra 'staging' primero."
+            exit 1
+          fi
+          echo "OK: el PR viene de staging."

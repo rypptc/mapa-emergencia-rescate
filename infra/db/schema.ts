@@ -807,6 +807,10 @@ export const users = pgTable(
     roleId: text("role_id"), // rol base (bundle). NULL = sin rol (solo grants)
     orgId: text("org_id"), // fase 2
     status: text("status").notNull().default("invited"), // invited|active|disabled
+    // Super admin: tier por ENCIMA del admin semilla. Único que puede gestionar
+    // la réplica pública (capability mirror:manage, con corte en resolve.ts). El
+    // admin semilla normal NO la tiene. Ver RFC 0006.
+    isSuperAdmin: boolean("is_super_admin").notNull().default(false),
     createdAt: epochMs("created_at").notNull(),
     lastLoginAt: epochMs("last_login_at"),
   },
@@ -904,5 +908,90 @@ export const auditLog = pgTable(
     index("idx_audit_created").on(t.createdAt.desc()),
     index("idx_audit_actor").on(t.actorUserId),
     index("idx_audit_target").on(t.targetType, t.targetId),
+  ],
+);
+
+/* ------------------------------------------------------------- earthquakes */
+// Catálogo de sismos en Venezuela, ingerido del USGS por el worker (feed
+// realtime cada minuto + backfill puntual vía FDSN). La PK es el `id` de evento
+// del USGS (ej. "us7000abcd") → el upsert es onConflictDoUpdate sobre la PK,
+// idempotente y a prueba de revisiones (USGS corrige magnitud horas después).
+// Datos públicos read-only; Venezuela genera <1 sismo/día (catálogo pequeño).
+export const earthquakes = pgTable(
+  "earthquakes",
+  {
+    id: text("id").primaryKey(), // id de evento USGS (clave natural)
+    magnitude: doublePrecision("magnitude"), // nullable: a veces se publica antes de calcularla
+    place: text("place").notNull(), // "43 km N of Carúpano, Venezuela"
+    lat: doublePrecision("lat").notNull(),
+    lng: doublePrecision("lng").notNull(),
+    depthKm: doublePrecision("depth_km"),
+    alert: text("alert"), // PAGER: green|yellow|orange|red (usualmente null en sismos chicos)
+    tsunami: boolean("tsunami").notNull().default(false),
+    sig: integer("sig"), // significancia USGS 0–1000
+    usgsUpdatedAt: epochMs("usgs_updated_at").notNull(), // 'updated' del USGS → decide si sobreescribir
+    occurredAt: epochMs("occurred_at").notNull(), // 'time' del USGS (momento del sismo)
+    fetchedAt: epochMs("fetched_at").notNull(), // cuándo lo vio nuestro worker
+  },
+  (t) => [
+    index("idx_earthquakes_occurred").on(t.occurredAt.desc()),
+    index("idx_earthquakes_geo").on(t.lat, t.lng),
+  ],
+);
+
+/* ---------------------------------------------------------------- api_keys */
+// API keys self-service por usuario (integraciones máquina-a-máquina contra
+// api/public/*). Nunca se guarda la llave cruda: solo su hash SHA-256 (igual que
+// hospital_poc_assignments e invitations). `prefix` es los primeros caracteres
+// (no secreto) para identificar la llave en la UI. `scopes` acota la llave a un
+// SUBCONJUNTO de las capacidades del usuario (least-privilege por integración);
+// el permiso efectivo en cada request = scopes ∩ capacidades vivas del usuario.
+// Soft-delete vía revokedAt (nunca borrado físico) — espeja el patrón de users.
+export const apiKeys = pgTable(
+  "api_keys",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(), // dueño de la llave
+    name: text("name").notNull().default(""), // etiqueta del usuario ("CI", "Postman"…)
+    keyHash: text("key_hash").notNull(), // SHA-256(llave cruda), nunca la cruda
+    prefix: text("prefix").notNull(), // primeros chars para mostrar (no secreto)
+    scopes: jsonb("scopes").notNull(), // string[] de capability keys (subconjunto del usuario)
+    createdAt: epochMs("created_at").notNull(),
+    lastUsedAt: epochMs("last_used_at"), // se actualiza fire-and-forget en cada uso
+    expiresAt: epochMs("expires_at"), // NULL = sin expiración
+    revokedAt: epochMs("revoked_at"), // NULL = activa (soft delete)
+    revokedBy: text("revoked_by"), // user.id que la revocó (self o admin)
+  },
+  (t) => [
+    uniqueIndex("idx_api_keys_hash").on(t.keyHash), // lookup O(1) en auth
+    index("idx_api_keys_user").on(t.userId), // listar "mis llaves"
+  ],
+);
+
+/* ------------------------------------------------------------ hub_credentials */
+// Credenciales de acceso a la RÉPLICA PÚBLICA (hub Postgres, RFC 0006). Cada fila
+// representa un consumidor externo al que un super admin le dio acceso SQL crudo.
+// El backend, al emitirla: (1) crea un ROL Postgres `consumer_<id>` en el hub con
+// password generada, (2) abre la IP del consumidor en el firewall mapa-hub-fw vía
+// la API de Hetzner. Esta tabla es el LIBRO MAYOR para poder revocar ambas cosas.
+// La password NUNCA se guarda (se muestra una vez, como api_keys). `pgRole` y
+// `allowedIp` + `hetznerRuleRef` permiten deshacer rol y regla al revocar.
+export const hubCredentials = pgTable(
+  "hub_credentials",
+  {
+    id: text("id").primaryKey(),
+    consumerName: text("consumer_name").notNull(), // etiqueta humana ("ONG X")
+    pgRole: text("pg_role").notNull(), // rol creado en el hub (consumer_<id>)
+    allowedIp: text("allowed_ip").notNull(), // CIDR/IP whitelisteada en el firewall
+    hetznerRuleRef: text("hetzner_rule_ref"), // marca para ubicar/quitar la regla
+    createdBy: text("created_by").notNull(), // user.id (super admin) que la emitió
+    createdAt: epochMs("created_at").notNull(),
+    lastRotatedAt: epochMs("last_rotated_at"), // si se rota la password
+    revokedAt: epochMs("revoked_at"), // NULL = activa (soft delete)
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    uniqueIndex("idx_hub_credentials_role").on(t.pgRole), // un rol por credencial
+    index("idx_hub_credentials_active").on(t.revokedAt),
   ],
 );

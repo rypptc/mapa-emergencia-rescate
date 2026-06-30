@@ -1,8 +1,10 @@
 # Deploy to Hetzner (k3s) — DEPLOY ONLY.
 #
 # Trigger:
-#   - PR MERGEADO a `main`  -> auto-deploy a STAGING (CD). Un push crudo / bypass
-#                              de admin a main NO dispara deploy.
+#   - PUSH a `main`         -> auto-deploy a STAGING (CD). Un merge de PR (incl.
+#                              desde fork) aterriza como push a main y corre con
+#                              secrets (contexto del repo base). El "no desplegar
+#                              en push crudo/bypass" lo impone el ruleset de main.
 #   - workflow_dispatch     -> deploy manual; eliges target (staging | prod).
 #                              (prod SIEMPRE es un botón deliberado, nunca auto.)
 #
@@ -14,8 +16,10 @@
 # enqueue) NO viven aquí a propósito — córrelas a mano (tofu/kubectl).
 #
 # RESTRICCIÓN: el gate real es el `if` a nivel de job
-# (github.event.pull_request.merged == true && base.ref == 'main', o dispatch).
-# El ruleset "proteger main" exige PR + review de code-owner + check Build & Test.
+# (event push && ref == refs/heads/main, o dispatch). El ruleset "proteger main"
+# exige PR + review de code-owner + check Build & Test, así que a main solo llega
+# código revisado — por eso "push a main" equivale a "PR mergeado" sin el agujero
+# de secrets de los PR de fork.
 #
 # Pre-requisitos (una vez, con provision fuera de este workflow): cluster k3s,
 # secret KUBECONFIG (base64), y los secrets app-env + migrate-env creados.
@@ -25,10 +29,14 @@
 name: Deploy to Hetzner (k3s)
 
 on:
-  # Solo despliega cuando un PR se MERGEA a main (no en push crudo / bypass de
-  # admin). El gate real es el `if` a nivel de job: merged==true && base==main.
-  pull_request:
-    types: [closed]
+  # Despliega cuando algo aterriza en `main`. Un merge de PR (incluido desde un
+  # FORK) crea un push a main, y ESE run corre en el contexto del repo base con
+  # acceso a secrets — a diferencia de `pull_request:closed`, que en PR de fork
+  # corre sin secrets (diseño de GitHub) y rompía el login a GHCR. El push filtra
+  # solo `main`, así que los commits a ramas de PR NO disparan deploy (un solo
+  # run por merge, sin doble-disparo). El "no desplegar en push crudo" lo impone
+  # el ruleset de protección de `main` (PR + review obligatorios), no el trigger.
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -45,6 +53,18 @@ permissions:
   packages: write       # push images to GHCR
   deployments: write
 
+# Concurrencia: a lo sumo UN deploy a la vez. cancel-in-progress:false NUNCA
+# aborta un deploy en vuelo (toca migraciones + roll de pods; cancelarlo a medias
+# dejaría estado inconsistente). Si llegan más merges mientras corre, GitHub
+# mantiene UN run pendiente y descarta los intermedios: el último pendiente se
+# construye sobre el `main` más nuevo y reemplaza a los viejos → se despliega el
+# estado final una sola vez (deploy = converger al último main, no reproducir
+# cada commit). Grupo fijo (no por-ref) porque todos los deploys van al MISMO
+# entorno y compiten por el mismo cluster.
+concurrency:
+  group: deploy-hetzner
+  cancel-in-progress: false
+
 # IMAGE is computed at runtime (lowercased) — GHCR/Docker require all-lowercase
 # repository names and ${{ github.repository }} can contain uppercase.
 
@@ -54,11 +74,12 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
-    # Corre solo si: (a) un PR se MERGEÓ a main, o (b) dispatch manual.
+    # Corre solo si: (a) push a main (un merge de PR aterriza aquí), o (b)
+    # dispatch manual. El filtro `push: branches: [main]` ya acota a main; el
+    # check de ref es defensivo.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       github.event.pull_request.base.ref == 'main')
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -95,29 +116,60 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
+  # Gate del PANEL ADMIN (Turborepo aparte, requiere Node 24). Job separado para
+  # no mezclar versiones de Node con el verify de frontend/backend.
+  verify-admin:
+    name: verify-admin
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - name: Install deps (admin)
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Lint admin
+        run: npm run lint
+      - name: Typecheck admin
+        run: npm run typecheck
+      - name: Test admin
+        run: npm run test
+
   deploy:
     name: deploy
     runs-on: ubuntu-latest
-    needs: verify
-    # Mismo gate que verify: PR mergeado a main, o dispatch manual. Un push crudo
-    # a main (p.ej. bypass de admin) NO dispara este workflow.
+    needs: [verify, verify-admin]
+    # Lee los secrets del Environment `production-hetzner` (sube con
+    # ./upload-github-secrets.sh -f .env -e production-hetzner). Da además reglas
+    # de protección de entorno (revisores/branches) sobre el deploy a prod.
+    environment: production-hetzner
+    # Mismo gate que verify: push a main (un merge de PR aterriza aquí), o
+    # dispatch manual. El "no desplegar en push crudo / bypass de admin" lo impone
+    # el ruleset de protección de main (PR + review obligatorios), no el trigger.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       github.event.pull_request.base.ref == 'main')
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # En pull_request:closed el checkout por defecto es la merge-ref del PR.
-          # El PR YA está mergeado, así que construimos sobre `main` real.
+          # En push a main, github.sha YA es el commit de main; fijamos ref: main
+          # explícito para ser inequívocos y reproducibles.
           ref: main
 
       - name: Compute image name (lowercase) + SHA
         run: |
           echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
-          # github.sha en pull_request apunta a la merge-ref de prueba; usamos el
-          # HEAD real de main (lo que acabamos de hacer checkout) para taggear.
+          # HEAD real de main (lo que acabamos de hacer checkout) para taggear la
+          # imagen — coincide con github.sha en push.
           echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       # Resuelve el target: merge a main -> staging; dispatch -> lo elegido
@@ -203,6 +255,30 @@ jobs:
           tags: |
             ${{ env.IMAGE }}-backend:${{ env.SHA }}
             ${{ env.IMAGE }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- admin (PANEL admin, Next standalone). context = admin/. El BFF llama
+      # al backend en RUNTIME (EMERGENCY_API_URL inyectado por el Deployment), así
+      # que NO va como build-arg. Solo el SHA (anti version-skew) y el asset prefix
+      # se fijan en build. -------------------------------------------------------
+      - name: Build and push (admin)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./admin
+          target: runtime
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.IMAGE }}-admin:${{ env.SHA }}
+            ${{ env.IMAGE }}-admin:latest
+          build-args: |
+            APP_BUILD_SHA=${{ env.SHA }}
+            # assetPrefix del panel = base CDN + sufijo /admin (sus estáticos van a
+            # s3://BUCKET/admin/_next/static, separados de los del frontend). Sin
+            # base CDN configurada -> vacío -> el pod sirve sus propios estáticos.
+            NEXT_PUBLIC_ASSET_PREFIX=${{ vars.NEXT_PUBLIC_R2_PUBLIC_BASE && format('{0}/admin', vars.NEXT_PUBLIC_R2_PUBLIC_BASE) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -347,6 +423,16 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # --- Réplica pública (hub SQL, RFC 0006). OPCIONALES: si su secret de GH
+          # no está, la clave se omite y la gestión de réplica queda OFF (503), sin
+          # afectar al resto. Se setean tras `tofu apply` del hub + el runbook.
+          # HCLOUD_TOKEN ya existe como secret (tofu); el backend lo reusa para el
+          # firewall del hub — se añade aquí para que el api también lo vea.
+          HUB_ADMIN_DATABASE_URL: ${{ secrets.HUB_ADMIN_DATABASE_URL }}
+          HUB_PUBLIC_HOST: ${{ secrets.HUB_PUBLIC_HOST }}
+          HUB_DB_NAME: ${{ secrets.HUB_DB_NAME }}
+          HUB_FIREWALL_ID: ${{ secrets.HUB_FIREWALL_ID }}
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
         run: |
           set -euo pipefail
           if ! kubectl -n mapa get secret app-env >/dev/null 2>&1; then
@@ -355,7 +441,7 @@ jobs:
           fi
           # Construimos el patch JSON solo con las claves que SÍ tienen valor
           # (omitimos las vacías para no pisar con "" lo que ya esté en el secret).
-          patch=$(KEYS="OPENPANEL_CLIENT_SECRET ADMIN_PASSWORD CORS_ORIGINS TURNSTILE_SECRET_KEY JWT_SECRET COOKIE_SECURE APP_BASE_URL SEED_ADMIN_EMAIL SEED_ADMIN_PASSWORD SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM" \
+          patch=$(KEYS="OPENPANEL_CLIENT_SECRET ADMIN_PASSWORD CORS_ORIGINS TURNSTILE_SECRET_KEY JWT_SECRET COOKIE_SECURE APP_BASE_URL SEED_ADMIN_EMAIL SEED_ADMIN_PASSWORD SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM HUB_ADMIN_DATABASE_URL HUB_PUBLIC_HOST HUB_DB_NAME HUB_FIREWALL_ID HCLOUD_TOKEN" \
             python3 -c 'import json,os; ks=os.environ["KEYS"].split(); print(json.dumps({k:os.environ[k] for k in ks if os.environ.get(k)}))')
           if [ "$patch" = '{}' ]; then
             echo "No runtime secrets to patch."
@@ -393,6 +479,36 @@ jobs:
             --no-progress
           echo "Synced $(find /tmp/next-static -type f | wc -l) files to r2://$R2_STATIC_BUCKET/_next/static"
 
+      # Igual que el frontend, pero para el PANEL admin → prefijo SEPARADO
+      # `admin/_next/static` (su assetPrefix es <R2_PUBLIC_BASE>/admin). Mismo
+      # bucket, carpeta aparte: los chunks de los dos apps no se mezclan. Additive
+      # (sin --delete), content-hashed + immutable. App plana: el static vive en
+      # /app/.next/static dentro de la imagen del admin.
+      - name: Upload admin static assets to R2 CDN
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_STATIC_BUCKET: ${{ secrets.R2_STATIC_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ENDPOINT:-}" ] || [ -z "${R2_STATIC_BUCKET:-}" ]; then
+            echo "R2 secrets unset — skipping admin static upload."
+            exit 0
+          fi
+          IMAGE="${{ env.IMAGE }}-admin:${{ env.SHA }}"
+          docker pull "$IMAGE"
+          CID=$(docker create "$IMAGE")
+          rm -rf /tmp/admin-static && mkdir -p /tmp/admin-static
+          docker cp "$CID":/app/.next/static/. /tmp/admin-static/
+          docker rm "$CID"
+          aws s3 sync /tmp/admin-static "s3://$R2_STATIC_BUCKET/admin/_next/static" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable" \
+            --checksum-algorithm CRC32 \
+            --no-progress
+          echo "Synced $(find /tmp/admin-static -type f | wc -l) files to r2://$R2_STATIC_BUCKET/admin/_next/static"
+
       # ---------------------------------------------------------------
       # 3. Apply manifests (Service rendered per target), gated migrate, roll.
       # ---------------------------------------------------------------
@@ -422,9 +538,10 @@ jobs:
           else
             export WEB_TLS_ANNOTATIONS=$(printf '    load-balancer.hetzner.cloud/protocol: "https"\n    load-balancer.hetzner.cloud/http-certificates: "cf-origin-dreamit"\n    load-balancer.hetzner.cloud/http-redirect-https: "true"')
           fi
-          # api SIEMPRE replica el perfil de web (sea managed o cf-origin).
+          # api y admin SIEMPRE replican el perfil de web (sea managed o cf-origin).
           export API_TLS_ANNOTATIONS="$WEB_TLS_ANNOTATIONS"
-          envsubst '${WEB_TLS_ANNOTATIONS} ${API_TLS_ANNOTATIONS}' \
+          export ADMIN_TLS_ANNOTATIONS="$WEB_TLS_ANNOTATIONS"
+          envsubst '${WEB_TLS_ANNOTATIONS} ${API_TLS_ANNOTATIONS} ${ADMIN_TLS_ANNOTATIONS}' \
             < infra/k8s/service.yaml > /tmp/service.rendered.yaml
           echo "--- rendered Services (target=$TARGET) ---"
           cat /tmp/service.rendered.yaml
@@ -501,7 +618,9 @@ jobs:
             app=${{ env.IMAGE }}-frontend:${{ env.SHA }}
           kubectl -n mapa set image deployment/api \
             app=${{ env.IMAGE }}-backend:${{ env.SHA }}
-          for tier in web api; do
+          kubectl -n mapa set image deployment/admin \
+            app=${{ env.IMAGE }}-admin:${{ env.SHA }}
+          for tier in web api admin; do
             kubectl -n mapa rollout status "deployment/${tier}" --timeout=300s
           done
           # migrate-worker reusa la imagen BACKEND (mismo artefacto, otro command).
@@ -515,7 +634,7 @@ jobs:
       - name: Rollback hint on failure
         if: ${{ failure() }}
         run: |
-          echo "::warning::Deploy failed. To revert: kubectl -n mapa rollout undo deployment/web && kubectl -n mapa rollout undo deployment/api"
+          echo "::warning::Deploy failed. To revert: kubectl -n mapa rollout undo deployment/web && kubectl -n mapa rollout undo deployment/api && kubectl -n mapa rollout undo deployment/admin"
 
       - name: Done
         run: echo "✅ deploy ($TARGET) finished."

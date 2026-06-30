@@ -47,6 +47,18 @@ function s3(): S3Client {
   return _s3;
 }
 
+/**
+ * Prefijo de namespace para las keys (aísla entornos en el MISMO bucket). En
+ * prod va vacío -> keys `images/...` (sin cambio). En staging pon
+ * R2_KEY_PREFIX=staging -> keys `staging/images/...`, para no pisar fotos de
+ * prod. Debe aplicarse en TODOS los sitios que construyen una key (ver también
+ * worker/r2.ts, worker/jobs/migratePhoto.ts y hubImage.ts).
+ */
+export function withPrefix(key: string): string {
+  const prefix = (process.env.R2_KEY_PREFIX || "").replace(/^\/+|\/+$/g, "");
+  return prefix ? `${prefix}/${key}` : key;
+}
+
 /** URL pública del CDN para una key almacenada. */
 function publicUrl(key: string): string {
   const base = (process.env.R2_PUBLIC_BASE || "").replace(/\/$/, "");
@@ -81,7 +93,7 @@ export async function uploadPhotoDataUrl(
 ): Promise<string> {
   const parsed = parseDataUri(dataUrl);
   if (!parsed) throw new Error("Foto inválida: se esperaba JPG, PNG o WebP en base64.");
-  const key = `images/${table}/${id}.${parsed.ext}`;
+  const key = withPrefix(`images/${table}/${id}.${parsed.ext}`);
   await s3().send(
     new PutObjectCommand({
       Bucket: process.env.R2_STATIC_BUCKET,
