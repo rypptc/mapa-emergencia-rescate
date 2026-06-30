@@ -725,11 +725,28 @@ function mergeCandidatesUnique(...lists: DedupCandidate[][]): DedupCandidate[] {
 }
 
 /**
+ * Opciones de `processImport`.
+ *
+ * `forceReview` es la INVARIANTE de seguridad del origen OCR/ICR (#151/#158): un
+ * lote extraído por OCR JAMÁS puede quedar "valid" ni auto-aplicarse, aunque sus
+ * campos parezcan completos y el hospital resuelva. Con `forceReview`, TODA fila
+ * se marca `needs_review` (saltando la clasificación normal de validez/dedup) y se
+ * le anexa `reviewWarning`. El apply (que solo toma "valid") nunca escribe nada.
+ */
+export interface ProcessImportOptions {
+  forceReview?: boolean;
+  reviewWarning?: string;
+}
+
+/**
  * Procesa un lote: normaliza/valida/deduplica cada fila y actualiza contadores.
  * Idempotente: re-correr re-evalúa el staging desde el crudo (no escribe
  * pacientes). Lo invoca el worker.
  */
-export async function processImport(importId: string): Promise<ImportSummaryDTO> {
+export async function processImport(
+  importId: string,
+  opts: ProcessImportOptions = {},
+): Promise<ImportSummaryDTO> {
   const db = getDb();
   const claimed = await transitionImportStatus(
     importId,
@@ -797,7 +814,16 @@ export async function processImport(importId: string): Promise<ImportSummaryDTO>
     let confidence = 0;
     let candidates: DedupCandidate[] = [];
 
-    if (errors.length > 0) {
+    if (opts.forceReview || ocrReview) {
+      // Origen OCR/ICR: NUNCA "valid", NUNCA auto-apply. Toda fila va a revisión
+      // humana obligatoria, saltando la clasificación de validez/dedup (no se
+      // registra como candidata del lote: no debe deduplicar a las siguientes).
+      rowStatus = "needs_review";
+      dedupStatus = "needs_review";
+      review++;
+      const warning = opts.reviewWarning ?? OCR_REVIEW_WARNING;
+      if (!warnings.includes(warning)) warnings.push(warning);
+    } else if (errors.length > 0) {
       rowStatus = "invalid";
       invalid++;
     } else if (hospitalUnresolved) {

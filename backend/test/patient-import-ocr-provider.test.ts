@@ -104,12 +104,15 @@ describe("extractPatientRowsFromImageUrl — request shape", () => {
 
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.model).toBe("MiniMax-M3");
-    expect(body.max_tokens).toBe(2048);
+    expect(body.max_completion_tokens).toBe(2048);
+    expect(body.temperature).toBe(0);
+    expect(body.thinking).toEqual({ type: "disabled" });
     // Multimodal content carries the image URL.
     const imagePart = body.messages[1].content.find(
       (p: { type: string }) => p.type === "image_url",
     );
     expect(imagePart.image_url.url).toBe(IMAGE_URL);
+    expect(imagePart.image_url.detail).toBe("default");
   });
 
   it("sends the configured (parametrized) model name", async () => {

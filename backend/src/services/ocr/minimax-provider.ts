@@ -101,14 +101,16 @@ export async function extractPatientRowsFromImageUrl(
       },
       body: JSON.stringify({
         model: config.model,
-        max_tokens: config.maxTokens,
+        max_completion_tokens: config.maxTokens,
+        temperature: 0,
+        thinking: { type: "disabled" },
         messages: [
           { role: "system", content: config.prompt },
           {
             role: "user",
             content: [
               { type: "text", text: "Extract the patient rows from this document as a JSON array." },
-              { type: "image_url", image_url: { url } },
+              { type: "image_url", image_url: { url, detail: "default" } },
             ],
           },
         ],

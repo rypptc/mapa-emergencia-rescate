@@ -33,8 +33,8 @@ import {
   isOcrPendingContentType,
   parseImportFile,
 } from "@/services/patient-import-parse";
-import { isMinimaxOcrEnabled } from "@/services/ocr/minimax-config";
 import type { RawPatientRow } from "@/services/patient-import-logic";
+import { getMinimaxOcrConfig } from "@/services/ocr/minimax-config";
 
 export const patientImportsRouter = Router();
 
@@ -74,6 +74,11 @@ const SUPPORTED_CONTENT_TYPES: ReadonlySet<string> = new Set([
   CONTENT_TYPE.CSV,
   CONTENT_TYPE.XLSX,
 ]);
+
+/** ¿Es un contentType de imagen (image/*) — el único OCR cableado por URL? */
+function isImageContentType(contentType: string | undefined): boolean {
+  return contentType !== undefined && contentType.trim().toLowerCase().startsWith("image/");
+}
 
 const createSchema = z
   .object({
@@ -117,9 +122,7 @@ const createSchema = z
   .superRefine((val, ctx) => {
     // `imageUrl` solo aplica a OCR de imagen (contentType image/*). En cualquier
     // otro formato es un campo fuera de lugar → 400 claro.
-    const isImage =
-      val.contentType !== undefined && val.contentType.trim().toLowerCase().startsWith("image/");
-    if (val.imageUrl !== undefined && !isImage) {
+    if (val.imageUrl !== undefined && !isImageContentType(val.contentType)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["imageUrl"],
@@ -266,8 +269,9 @@ patientImportsRouter.post(
     //   - imagen sin imageUrl      → 400 (no se acepta base64/rows para OCR).
     // La URL de imagen NO se persiste: viaja al worker en el payload del job.
     if (parsed.contentType !== undefined && isOcrPendingContentType(parsed.contentType)) {
-      const isImage = parsed.contentType.trim().toLowerCase().startsWith("image/");
-      if (!isMinimaxOcrEnabled() || !isImage) {
+      const ocrConfig = getMinimaxOcrConfig();
+      const isImage = isImageContentType(parsed.contentType);
+      if (!ocrConfig || !isImage) {
         throw notImplemented(
           "Importación por OCR/ICR (imagen o PDF) no está habilitada en este servidor. " +
             "El reconocimiento de imágenes/PDF y de texto manuscrito requiere revisión humana. " +
